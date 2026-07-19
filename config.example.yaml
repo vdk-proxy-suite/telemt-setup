@@ -1,0 +1,48 @@
+install:
+  version: "3.4.23"
+  architecture: "x86_64"
+  libc: "gnu"
+  sha256: "143d60ac41bcb5755e1433e66f75293139645984b7c74052248e70e85b94af80"
+  service_name: "telemt"
+  user: "telemt"
+  group: "telemt"
+  binary_path: "/bin/telemt"
+  config_path: "/etc/telemt/telemt.toml"
+  work_dir: "/opt/telemt"
+  backup_root: "/var/backups/telemt-setup"
+  state_root: "/var/lib/telemt-setup"
+  manage_ufw: false
+
+server:
+  listen_ip: "0.0.0.0"
+  port: 443
+  max_connections: 256
+  api_listen: "127.0.0.1:9091"
+  metrics_listen: "127.0.0.1:9090"
+
+links:
+  # Replace with the public IPv4 address or DNS name of the new VM.
+  public_host: "CHANGE_ME"
+  public_port: 443
+
+proxy:
+  use_middle_proxy: true
+  log_level: "normal"
+  modes:
+    classic: false
+    secure: false
+    tls: true
+  tls_domain: "petrovich.ru"
+  mask: true
+  tls_emulation: true
+
+users:
+  hello:
+    # GENERATE creates a random 32-hex secret on first install and preserves it
+    # on idempotent reruns for the same username.
+    secret: "GENERATE"
+    ad_tag: null
+    max_unique_ips: null
+
+probes:
+  timeout_seconds: 10

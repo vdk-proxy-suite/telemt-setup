@@ -13,7 +13,7 @@ permissions, health-check и отдельный cleaner.
 На новой Ubuntu VM:
 
 ```bash
-unzip telemt-setup-standalone-1.1.0.zip
+unzip telemt-setup-standalone-1.1.1.zip
 cd telemt-setup
 cp config.example.yaml config.yaml
 nano config.yaml
@@ -146,6 +146,13 @@ cloud security group и не затрагивает другие экземпл�
 
 В ZIP намеренно отсутствуют binary Telemt, `config.yaml`, secrets, venv, Git,
 PCAP, runtime cache и отчёты тестовых прогонов.
+
+## Изменения версии 1.1.1
+
+- Production-профили `config.<ssh-alias>.yaml` и локальный `AGENTS.md`
+  исключаются из Git и standalone ZIP
+- Release builder исключает все боевые `config*.yaml`, сохраняя публичный
+  `config.example.yaml`
 
 ## Изменения версии 1.1.0
 

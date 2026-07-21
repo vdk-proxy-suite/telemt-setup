@@ -10,11 +10,13 @@ import zipfile
 
 
 EXECUTABLE_NAMES = {"setuptelemt.sh", "cleantelemt.sh"}
-EXCLUDED_NAMES = {"config.yaml", "__pycache__", ".git", ".agents", "venv"}
+EXCLUDED_NAMES = {"AGENTS.md", "__pycache__", ".git", ".agents", "venv", ".venv"}
 
 
 def excluded(path: Path) -> bool:
-    return any(part in EXCLUDED_NAMES for part in path.parts) or path.suffix in {".pyc", ".pcap", ".pcapng"}
+    if any(part in EXCLUDED_NAMES for part in path.parts) or path.suffix in {".pyc", ".pcap", ".pcapng"}:
+        return True
+    return path.name.startswith("config") and path.suffix == ".yaml" and not path.name.endswith(".example.yaml")
 
 
 def main() -> int:

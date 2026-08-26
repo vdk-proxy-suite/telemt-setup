@@ -1,8 +1,8 @@
 install:
-  version: "3.4.23"
+  version: "3.5.3"
   architecture: "x86_64"
   libc: "gnu"
-  sha256: "143d60ac41bcb5755e1433e66f75293139645984b7c74052248e70e85b94af80"
+  sha256: "f3a5a3ad022243e456f9fac20b8e1acf2ef14654e6b104b2766235739c41d5d2"
   service_name: "telemt"
   user: "telemt"
   group: "telemt"

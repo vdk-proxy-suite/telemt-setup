@@ -13,7 +13,7 @@ permissions, health-check и отдельный cleaner.
 На новой Ubuntu VM:
 
 ```bash
-unzip telemt-setup-standalone-1.2.0.zip
+unzip telemt-setup-standalone-1.2.1.zip
 cd telemt-setup
 cp config.example.yaml config.yaml
 nano config.yaml
@@ -104,13 +104,13 @@ upstreams:
 несколько enabled-записей Telemt выбирает по весу, поэтому такой fallback мог бы
 незаметно вернуть исходящий трафик на IP виртуальной машины.
 
-SOCKS5 совместим с `proxy.use_middle_proxy: true` в закреплённом Telemt 3.4.23:
+SOCKS5 совместим с `proxy.use_middle_proxy: true` в закреплённом Telemt 3.5.3:
 этот маршрут применяется и к TCP-соединениям с Telegram Middle-End. Для ME
 удалённый SOCKS5 должен возвращать корректный публичный `BND.ADDR` и ненулевой
 `BND.PORT`; обычная проверка через `curl --socks5` этого не подтверждает.
 
 YAML с SOCKS5-паролем должен иметь режим `0600`. Сохраняйте
-`proxy.log_level: "normal"`: Telemt 3.4.23 может показать структуру upstream с
+`proxy.log_level: "normal"`: Telemt может показать структуру upstream с
 credentials в подробных debug/verbose-логах.
 
 ## Firewall и эксплуатация
@@ -184,6 +184,13 @@ cloud security group и не затрагивает другие экземпл�
 В ZIP намеренно отсутствуют binary Telemt, `config.yaml`, secrets, venv, Git,
 PCAP, runtime cache и отчёты тестовых прогонов.
 
+## Изменения версии 1.2.1
+
+- Закреплён официальный Telemt 3.5.3 для Ubuntu x86_64 GNU
+- SHA-256 release asset обновлён и независимо сверен с официальным checksum
+- Сгенерированный strict TOML, SOCKS5/ME и readiness API проверены на
+  совместимость без изменения конфигурации
+
 ## Изменения версии 1.2.0
 
 - Добавлен опциональный список SOCKS5 `upstreams` с генерацией корневых
@@ -212,6 +219,6 @@ PCAP, runtime cache и отчёты тестовых прогонов.
 - Telemt: <https://github.com/telemt/telemt>
 - Актуальный пример конфига: <https://github.com/telemt/telemt/blob/main/config.toml>
 - FAQ: <https://github.com/telemt/telemt/blob/main/docs/FAQ.ru.md>
-- Upstream manager Telemt 3.4.23: <https://github.com/telemt/telemt/blob/3.4.23/docs/Advanced_settings/TUNING.en.md>
-- Readiness API Telemt 3.4.23: <https://github.com/telemt/telemt/blob/3.4.23/docs/Architecture/API/API.md>
+- Upstream manager Telemt 3.5.3: <https://github.com/telemt/telemt/blob/3.5.3/docs/Advanced_settings/TUNING.en.md>
+- Readiness API Telemt 3.5.3: <https://github.com/telemt/telemt/blob/3.5.3/docs/Architecture/API/API.md>
 - Лицензия: <https://github.com/telemt/telemt/blob/main/LICENSE>

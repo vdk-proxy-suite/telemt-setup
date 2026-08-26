@@ -37,8 +37,9 @@ proxy:
   tls_emulation: true
 
 # Optional outbound route from Telemt to Telegram. An empty list preserves
-# Telemt's default direct egress. To force all Telegram/ME traffic through an
-# authenticated SOCKS5 proxy, replace [] with the commented structure below.
+# Telemt's default direct egress. With SOCKS5 enabled, Telegram/DC/ME uses only
+# that unscoped route; TLS-front metadata and masking egress stay direct from
+# this VM automatically. No additional YAML routing fields are needed.
 upstreams: []
 # upstreams:
 #   - type: "socks5"

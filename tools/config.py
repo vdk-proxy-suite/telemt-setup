@@ -39,6 +39,8 @@ SERVICE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.@-]{0,63}$")
 HEX32_RE = re.compile(r"^[0-9a-fA-F]{32}$")
 USER_KEY_RE = re.compile(r"^[A-Za-z0-9_.@-]{1,64}$")
 HOST_RE = re.compile(r"^(?=.{1,253}$)([A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)(\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$")
+# Keep underscores: Telemt client-provided scope hints allow alphanumerics and hyphens only.
+TLS_FETCH_DIRECT_SCOPE = "telemt_setup_tls_front_direct"
 
 
 class ConfigError(ValueError):
@@ -300,6 +302,10 @@ def existing_secrets(path: Path | None) -> dict[str, str]:
 def render(data: dict, old_secrets: dict[str, str]) -> str:
     install, server, links, proxy, users = (data[k] for k in ("install", "server", "links", "proxy", "users"))
     upstreams = data.get("upstreams", [])
+    tls_domain = proxy.get("tls_domain") or ""
+    tls_fetch_direct = proxy["tls_emulation"] and any(
+        upstream.get("enabled", True) for upstream in upstreams
+    )
     resolved: dict[str, str] = {}
     for username, user in users.items():
         configured = user["secret"]
@@ -341,12 +347,22 @@ def render(data: dict, old_secrets: dict[str, str]) -> str:
         f"ip = {toml_string(server['listen_ip'])}",
         "",
         "[censorship]",
-        f"tls_domain = {toml_string(proxy['tls_domain'])}",
+    ]
+    if tls_domain:
+        lines.append(f"tls_domain = {toml_string(tls_domain)}")
+    lines.extend([
         f"mask = {str(proxy['mask']).lower()}",
         f"tls_emulation = {str(proxy['tls_emulation']).lower()}",
         'tls_front_dir = "tlsfront"',
-        "",
-    ]
+    ])
+    if tls_fetch_direct:
+        lines.extend([
+            f"tls_fetch_scope = {toml_string(TLS_FETCH_DIRECT_SCOPE)}",
+            "",
+            "[censorship.tls_fetch]",
+            "strict_route = true",
+        ])
+    lines.append("")
     for upstream in upstreams:
         lines.extend([
             "[[upstreams]]",
@@ -361,6 +377,16 @@ def render(data: dict, old_secrets: dict[str, str]) -> str:
         lines.extend([
             f"weight = {upstream.get('weight', 1)}",
             f"enabled = {str(upstream.get('enabled', True)).lower()}",
+            "",
+        ])
+    if tls_fetch_direct:
+        lines.extend([
+            "# Internal route: TLS-front metadata must bypass Telegram SOCKS5 upstreams.",
+            "[[upstreams]]",
+            'type = "direct"',
+            f"scopes = {toml_string(TLS_FETCH_DIRECT_SCOPE)}",
+            "weight = 1",
+            "enabled = true",
             "",
         ])
     lines.append("[access.users]")

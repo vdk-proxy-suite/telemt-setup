@@ -13,7 +13,7 @@ permissions, health-check и отдельный cleaner.
 На новой Ubuntu VM:
 
 ```bash
-unzip telemt-setup-standalone-1.2.1.zip
+unzip telemt-setup-standalone-1.2.2.zip
 cd telemt-setup
 cp config.example.yaml config.yaml
 nano config.yaml
@@ -80,13 +80,13 @@ setup для существующего имени. Удаление устан�
 
 ## Исходящий SOCKS5 для MTProto
 
-Опциональный корневой список `upstreams` направляет исходящий тракт самого
-Telemt через SOCKS5, включая MTProto/Telegram Middle-End и обращения TLS-front
-для маскировки. Он не настраивает прокси для сторонних приложений или Telegram
-Bot API; SOCKS5 должен разрешать доступ и к используемому `tls_domain`.
+Опциональный корневой список `upstreams` направляет через SOCKS5 только основной
+исходящий маршрут Telemt к Telegram: MTProto/DC, Telegram Middle-End и служебные
+ME-запросы. Он не настраивает прокси для сторонних приложений или Telegram Bot
+API. Доступ SOCKS5 к `proxy.tls_domain` не требуется.
 
-Чтобы жёстко направить весь поддерживаемый Telemt-трафик через один внешний
-SOCKS5, добавьте:
+Чтобы жёстко направить Telegram-трафик Telemt через один внешний SOCKS5,
+добавьте:
 
 ```yaml
 upstreams:
@@ -100,9 +100,45 @@ upstreams:
 
 Поля `username` и `password` можно вместе удалить для SOCKS5 без авторизации.
 Если `upstreams` отсутствует или равен `[]`, Telemt использует обычный прямой
-маршрут. Установщик намеренно не добавляет прямой fallback рядом с SOCKS5:
-несколько enabled-записей Telemt выбирает по весу, поэтому такой fallback мог бы
-незаметно вернуть исходящий трафик на IP виртуальной машины.
+маршрут без дополнительных scoped-записей.
+
+При одновременно включённом `proxy.tls_emulation` и хотя бы одном enabled
+SOCKS5 установщик автоматически генерирует отдельный внутренний маршрут:
+
+```toml
+[censorship]
+tls_fetch_scope = "telemt_setup_tls_front_direct"
+
+[censorship.tls_fetch]
+strict_route = true
+
+[[upstreams]]
+type = "direct"
+scopes = "telemt_setup_tls_front_direct"
+weight = 1
+enabled = true
+```
+
+Пользовательские SOCKS5-записи остаются без `scopes`. В Telemt 3.5.3 запрос без
+scope может выбрать только unscoped-запись, а запрос с scope — только запись с
+точно совпадающим тегом. Поэтому Telegram/ME не видит внутренний `direct`, а
+TLS-front metadata bootstrap/refresh не видит SOCKS5. `strict_route = true`
+запрещает TLS-fetch скрыто переходить на другой маршрут при ошибке.
+
+Это жёсткое поведение установщика и оно не добавляет внешний YAML-параметр:
+`direct`, `scopes` и `tls_fetch_scope` нельзя задавать через `config.yaml`.
+Обычная маскировочная переадресация неизвестного TLS-клиента к домену также
+выполняется самим Telemt напрямую с VM и не использует upstream manager.
+`direct` здесь означает системный DNS и таблицу маршрутизации VM; transparent
+proxy или policy routing самой ОС находятся вне контроля Telemt.
+
+Установщик намеренно не добавляет unscoped direct fallback рядом с SOCKS5:
+иначе Telegram-трафик мог бы незаметно вернуться на публичный IP VM. Если
+`proxy.tls_emulation: false`, TLS metadata fetch отсутствует и внутренний scoped
+direct не создаётся. Конфигурации без `proxy.tls_domain` при выключенном TLS-mode
+также поддерживаются: поле не выводится в TOML; если TLS-emulation всё же
+включена, Telemt использует свой домен по умолчанию и получает его метаданные
+через тот же внутренний direct route.
 
 SOCKS5 совместим с `proxy.use_middle_proxy: true` в закреплённом Telemt 3.5.3:
 этот маршрут применяется и к TCP-соединениям с Telegram Middle-End. Для ME
@@ -123,7 +159,8 @@ TCP/443 и отдельно нужный диапазон для SSH. Telemt н�
 `install.manage_ufw: true` добавляет локальное allow-правило для proxy TCP-порта.
 Не забудьте разрешить исходящий TCP к инфраструктуре Telegram и GitHub во время
 установки. При настроенном `upstreams` VM также должен иметь TCP-доступ к адресу
-SOCKS5.
+SOCKS5, а при `proxy.tls_emulation: true` — прямой TCP/443 и DNS-доступ к
+`proxy.tls_domain` либо к домену Telemt по умолчанию.
 
 Проверки на VM:
 
@@ -144,8 +181,12 @@ venv/bin/python tools/healthcheck.py --scope e2e --config config.yaml
 В Windows PowerShell используйте `venv\Scripts\python.exe`. E2E проверяет
 публичный TCP, SNI и Fake-TLS handshake. API/metrics и runtime-логи подтверждают
 готовность Telemt и Middle Proxy. VM healthcheck также требует успешный ответ
-`/v1/health/ready`, то есть открытый admission и хотя бы один здоровый upstream,
-но без авторизованного Telegram-клиента тест не доказывает доставку сообщений.
+`/v1/health/ready`. Если в YAML есть SOCKS5, он отдельно проверяет
+`/v1/runtime/upstream-quality` и требует хотя бы один healthy unscoped SOCKS5:
+для него должно существовать фактическое успешное DC-наблюдение latency, поэтому
+ни начальное `healthy=true`, ни внутренний TLS-direct не могут скрыть отказ
+Telegram-маршрута. Без авторизованного Telegram-клиента тест всё равно не
+доказывает доставку сообщений.
 
 ## Обновление
 
@@ -184,6 +225,18 @@ cloud security group и не затрагивает другие экземпл�
 В ZIP намеренно отсутствуют binary Telemt, `config.yaml`, secrets, venv, Git,
 PCAP, runtime cache и отчёты тестовых прогонов.
 
+## Изменения версии 1.2.2
+
+- Без изменения внешнего YAML добавлено жёсткое разделение маршрутов: Telegram
+  DC/ME остаются на unscoped SOCKS5, TLS-front metadata fetch использует только
+  внутренний scoped direct с `strict_route = true`
+- Маскировочная переадресация и TLS-front обращения документированы как прямой
+  egress VM; SOCKS5 больше не обязан разрешать доступ к `tls_domain`
+- Сохранено прежнее поведение без upstream; исправлен рендеринг конфигураций без
+  явно заданного `tls_domain`. Scoped direct создаётся только при TLS-emulation
+- VM healthcheck теперь требует healthy unscoped SOCKS5 с наблюдаемой DC latency
+  и не принимает начальный health или TLS-direct за исправный Telegram-маршрут
+
 ## Изменения версии 1.2.1
 
 - Закреплён официальный Telemt 3.5.3 для Ubuntu x86_64 GNU
@@ -220,5 +273,6 @@ PCAP, runtime cache и отчёты тестовых прогонов.
 - Актуальный пример конфига: <https://github.com/telemt/telemt/blob/main/config.toml>
 - FAQ: <https://github.com/telemt/telemt/blob/main/docs/FAQ.ru.md>
 - Upstream manager Telemt 3.5.3: <https://github.com/telemt/telemt/blob/3.5.3/docs/Advanced_settings/TUNING.en.md>
+- `tls_fetch_scope` и `scopes` Telemt 3.5.3: <https://github.com/telemt/telemt/blob/3.5.3/docs/Config_params/CONFIG_PARAMS.ru.md>
 - Readiness API Telemt 3.5.3: <https://github.com/telemt/telemt/blob/3.5.3/docs/Architecture/API/API.md>
 - Лицензия: <https://github.com/telemt/telemt/blob/main/LICENSE>

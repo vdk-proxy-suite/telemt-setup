@@ -72,6 +72,56 @@ def api_ready(config: dict) -> dict:
     return payload
 
 
+def api_telegram_upstream_ready(config: dict) -> dict | None:
+    configured = config.get("upstreams", [])
+    if not isinstance(configured, list) or not any(
+        isinstance(upstream, dict) and upstream.get("enabled", True) for upstream in configured
+    ):
+        return None
+
+    host, port = endpoint(config["server"]["api_listen"])
+    timeout = config["probes"]["timeout_seconds"]
+    url = f"http://{host}:{port}/v1/runtime/upstream-quality"
+    payload = json.loads(http_get(url, timeout))
+    data = payload.get("data") if isinstance(payload, dict) else None
+    rows = data.get("upstreams") if isinstance(data, dict) else None
+    if (
+        not isinstance(payload, dict)
+        or payload.get("ok") is not True
+        or not isinstance(data, dict)
+        or data.get("enabled") is not True
+        or not isinstance(rows, list)
+    ):
+        reason = data.get("reason", "unexpected response") if isinstance(data, dict) else "unexpected response"
+        raise RuntimeError(f"Telegram upstream status is unavailable: {reason}")
+
+    telegram_routes = [
+        row
+        for row in rows
+        if isinstance(row, dict)
+        and row.get("route_kind") == "socks5"
+        and isinstance(row.get("scopes", ""), str)
+        and not row.get("scopes", "").strip()
+    ]
+    if not telegram_routes:
+        raise RuntimeError("Telemt reports no unscoped SOCKS5 route for Telegram")
+    observed_healthy_routes = [
+        row
+        for row in telegram_routes
+        if row.get("healthy") is True
+        and isinstance(row.get("dc"), list)
+        and any(
+            isinstance(dc, dict) and dc.get("latency_ema_ms") is not None
+            for dc in row["dc"]
+        )
+    ]
+    if not observed_healthy_routes:
+        raise RuntimeError(
+            "Telemt reports no healthy unscoped SOCKS5 route with observed Telegram DC connectivity"
+        )
+    return payload
+
+
 def check_vm(config: dict) -> None:
     service = config["install"]["service_name"] + ".service"
     subprocess.run(["systemctl", "is-active", "--quiet", service], check=True)
@@ -87,12 +137,14 @@ def check_vm(config: dict) -> None:
     metrics_host, metrics_port = endpoint(config["server"]["metrics_listen"])
     deadline = time.monotonic() + timeout
     last_error: Exception | None = None
+    upstream_payload: dict | None = None
     while True:
         try:
             with socket.create_connection((connect_host, config["server"]["port"]), timeout=1):
                 pass
             payload = api_users(config)
             api_ready(config)
+            upstream_payload = api_telegram_upstream_ready(config)
             metrics = http_get(f"http://{metrics_host}:{metrics_port}/metrics", 2).decode("utf-8", "replace")
             break
         except Exception as exc:
@@ -113,6 +165,8 @@ def check_vm(config: dict) -> None:
     print(f"PASS proxy listener: {connect_host}:{config['server']['port']}")
     print(f"PASS API: {len(payload['data'])} user record(s), secrets suppressed")
     print("PASS readiness: admission open and at least one upstream healthy")
+    if upstream_payload is not None:
+        print("PASS Telegram route: at least one unscoped SOCKS5 upstream healthy")
     print(f"PASS metrics: {metrics_host}:{metrics_port}/metrics")
 
 
@@ -120,7 +174,11 @@ def check_e2e(config: dict) -> None:
     host = config["links"]["public_host"]
     port = config["links"]["public_port"]
     timeout = config["probes"]["timeout_seconds"]
-    domain = config["proxy"]["tls_domain"]
+    proxy = config.get("proxy")
+    modes = proxy.get("modes") if isinstance(proxy, dict) else None
+    domain = proxy.get("tls_domain") if isinstance(proxy, dict) else None
+    if not isinstance(modes, dict) or modes.get("tls") is not True or not domain:
+        raise RuntimeError("external Fake-TLS check requires TLS mode and proxy.tls_domain")
     context = ssl.create_default_context()
     context.check_hostname = False
     context.verify_mode = ssl.CERT_NONE

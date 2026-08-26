@@ -47,6 +47,99 @@ class HealthcheckTests(unittest.TestCase):
                     with self.assertRaisesRegex(RuntimeError, "unexpected"):
                         healthcheck.api_ready(self.config)
 
+    def test_telegram_upstream_ready_ignores_scoped_direct_route(self) -> None:
+        config = {
+            **self.config,
+            "upstreams": [{"type": "socks5", "address": "proxy.example.invalid:1080"}],
+        }
+        response = {
+            "ok": True,
+            "data": {
+                "enabled": True,
+                "upstreams": [
+                    {
+                        "route_kind": "socks5",
+                        "scopes": "",
+                        "healthy": True,
+                        "dc": [{"latency_ema_ms": 42.0}],
+                    },
+                    {
+                        "route_kind": "direct",
+                        "scopes": "telemt_setup_tls_front_direct",
+                        "healthy": True,
+                    },
+                ],
+            },
+        }
+        with patch.object(healthcheck, "http_get", return_value=json.dumps(response).encode()) as get:
+            payload = healthcheck.api_telegram_upstream_ready(config)
+
+        self.assertEqual(payload, response)
+        get.assert_called_once_with("http://127.0.0.1:9091/v1/runtime/upstream-quality", 10)
+
+    def test_telegram_upstream_ready_rejects_only_healthy_scoped_direct(self) -> None:
+        config = {
+            **self.config,
+            "upstreams": [{"type": "socks5", "address": "proxy.example.invalid:1080"}],
+        }
+        response = {
+            "ok": True,
+            "data": {
+                "enabled": True,
+                "upstreams": [
+                    {"route_kind": "socks5", "scopes": "", "healthy": False},
+                    {
+                        "route_kind": "direct",
+                        "scopes": "telemt_setup_tls_front_direct",
+                        "healthy": True,
+                    },
+                ],
+            },
+        }
+        with patch.object(healthcheck, "http_get", return_value=json.dumps(response).encode()):
+            with self.assertRaisesRegex(RuntimeError, "no healthy unscoped SOCKS5"):
+                healthcheck.api_telegram_upstream_ready(config)
+
+    def test_telegram_upstream_ready_rejects_unobserved_initial_health(self) -> None:
+        config = {
+            **self.config,
+            "upstreams": [{"type": "socks5", "address": "proxy.example.invalid:1080"}],
+        }
+        response = {
+            "ok": True,
+            "data": {
+                "enabled": True,
+                "upstreams": [
+                    {
+                        "route_kind": "socks5",
+                        "scopes": "",
+                        "healthy": True,
+                        "dc": [{"latency_ema_ms": None}],
+                    }
+                ],
+            },
+        }
+        with patch.object(healthcheck, "http_get", return_value=json.dumps(response).encode()):
+            with self.assertRaisesRegex(RuntimeError, "observed Telegram DC connectivity"):
+                healthcheck.api_telegram_upstream_ready(config)
+
+    def test_telegram_upstream_ready_is_skipped_without_upstreams(self) -> None:
+        with patch.object(healthcheck, "http_get") as get:
+            payload = healthcheck.api_telegram_upstream_ready(self.config)
+
+        self.assertIsNone(payload)
+        get.assert_not_called()
+
+    def test_e2e_without_tls_domain_fails_with_clear_error(self) -> None:
+        config = {
+            **self.config,
+            "links": {"public_host": "proxy.example.invalid", "public_port": 443},
+            "proxy": {"modes": {"tls": False}},
+        }
+
+        with self.assertRaisesRegex(RuntimeError, "requires TLS mode and proxy.tls_domain"):
+            healthcheck.check_e2e(config)
+
 
 if __name__ == "__main__":
     unittest.main()

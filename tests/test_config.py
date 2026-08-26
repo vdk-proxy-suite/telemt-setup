@@ -28,12 +28,17 @@ class ConfigTests(unittest.TestCase):
         return tomllib.loads(config_tool.render(validated, {}))
 
     def test_config_without_upstreams_remains_backward_compatible(self) -> None:
-        data = self.base_config()
-        data.pop("upstreams")
+        for representation in ("absent", "empty"):
+            with self.subTest(representation=representation):
+                data = self.base_config()
+                if representation == "absent":
+                    data.pop("upstreams")
 
-        rendered = self.parse_rendered(data)
+                rendered = self.parse_rendered(data)
 
-        self.assertNotIn("upstreams", rendered)
+                self.assertNotIn("upstreams", rendered)
+                self.assertNotIn("tls_fetch_scope", rendered["censorship"])
+                self.assertNotIn("tls_fetch", rendered["censorship"])
 
     def test_authenticated_socks5_is_rendered_with_middle_proxy(self) -> None:
         data = self.base_config()
@@ -61,9 +66,17 @@ class ConfigTests(unittest.TestCase):
                     "password": 'p\\ass"word',
                     "weight": 1,
                     "enabled": True,
-                }
+                },
+                {
+                    "type": "direct",
+                    "scopes": config_tool.TLS_FETCH_DIRECT_SCOPE,
+                    "weight": 1,
+                    "enabled": True,
+                },
             ],
         )
+        self.assertEqual(rendered["censorship"]["tls_fetch_scope"], config_tool.TLS_FETCH_DIRECT_SCOPE)
+        self.assertEqual(rendered["censorship"]["tls_fetch"], {"strict_route": True})
 
     def test_unauthenticated_socks5_uses_safe_defaults(self) -> None:
         data = self.base_config()
@@ -84,6 +97,116 @@ class ConfigTests(unittest.TestCase):
                     "address": "[2001:db8::10]:1080",
                     "weight": 1,
                     "enabled": True,
+                },
+                {
+                    "type": "direct",
+                    "scopes": config_tool.TLS_FETCH_DIRECT_SCOPE,
+                    "weight": 1,
+                    "enabled": True,
+                },
+            ],
+        )
+
+    def test_no_tls_domain_does_not_add_scoped_direct_route(self) -> None:
+        for representation in ("absent", "empty"):
+            with self.subTest(representation=representation):
+                data = self.base_config()
+                data["proxy"]["modes"] = {"classic": True, "secure": False, "tls": False}
+                if representation == "absent":
+                    data["proxy"].pop("tls_domain")
+                else:
+                    data["proxy"]["tls_domain"] = ""
+                data["proxy"]["mask"] = False
+                data["proxy"]["tls_emulation"] = False
+                data["upstreams"] = [
+                    {
+                        "type": "socks5",
+                        "address": "proxy.example.invalid:1080",
+                    }
+                ]
+
+                rendered = self.parse_rendered(data)
+
+                self.assertNotIn("tls_domain", rendered["censorship"])
+                self.assertNotIn("tls_fetch_scope", rendered["censorship"])
+                self.assertNotIn("tls_fetch", rendered["censorship"])
+                self.assertEqual(
+                    rendered["upstreams"],
+                    [
+                        {
+                            "type": "socks5",
+                            "address": "proxy.example.invalid:1080",
+                            "weight": 1,
+                            "enabled": True,
+                        }
+                    ],
+                )
+
+    def test_tls_emulation_without_explicit_domain_still_fetches_direct(self) -> None:
+        data = self.base_config()
+        data["proxy"]["modes"] = {"classic": True, "secure": False, "tls": False}
+        data["proxy"].pop("tls_domain")
+        data["proxy"]["mask"] = False
+        data["upstreams"] = [
+            {
+                "type": "socks5",
+                "address": "proxy.example.invalid:1080",
+            }
+        ]
+
+        rendered = self.parse_rendered(data)
+
+        self.assertNotIn("tls_domain", rendered["censorship"])
+        self.assertEqual(rendered["censorship"]["tls_fetch_scope"], config_tool.TLS_FETCH_DIRECT_SCOPE)
+        self.assertEqual(rendered["censorship"]["tls_fetch"], {"strict_route": True})
+        self.assertEqual(rendered["upstreams"][0]["type"], "socks5")
+        self.assertNotIn("scopes", rendered["upstreams"][0])
+        self.assertEqual(
+            rendered["upstreams"][1],
+            {
+                "type": "direct",
+                "scopes": config_tool.TLS_FETCH_DIRECT_SCOPE,
+                "weight": 1,
+                "enabled": True,
+            },
+        )
+
+    def test_without_upstreams_or_tls_domain_uses_telemt_defaults(self) -> None:
+        data = self.base_config()
+        data.pop("upstreams")
+        data["proxy"]["modes"] = {"classic": True, "secure": False, "tls": False}
+        data["proxy"].pop("tls_domain")
+        data["proxy"]["mask"] = False
+        data["proxy"]["tls_emulation"] = False
+
+        rendered = self.parse_rendered(data)
+
+        self.assertNotIn("tls_domain", rendered["censorship"])
+        self.assertNotIn("tls_fetch_scope", rendered["censorship"])
+        self.assertNotIn("tls_fetch", rendered["censorship"])
+        self.assertNotIn("upstreams", rendered)
+
+    def test_multiple_socks_upstreams_share_one_internal_direct_route(self) -> None:
+        data = self.base_config()
+        data["upstreams"] = [
+            {"type": "socks5", "address": "proxy-a.example.invalid:1080"},
+            {"type": "socks5", "address": "proxy-b.example.invalid:1080", "weight": 2},
+        ]
+
+        rendered = self.parse_rendered(data)
+
+        socks_routes = [item for item in rendered["upstreams"] if item["type"] == "socks5"]
+        direct_routes = [item for item in rendered["upstreams"] if item["type"] == "direct"]
+        self.assertEqual(len(socks_routes), 2)
+        self.assertTrue(all("scopes" not in item for item in socks_routes))
+        self.assertEqual(
+            direct_routes,
+            [
+                {
+                    "type": "direct",
+                    "scopes": config_tool.TLS_FETCH_DIRECT_SCOPE,
+                    "weight": 1,
+                    "enabled": True,
                 }
             ],
         )
@@ -94,6 +217,23 @@ class ConfigTests(unittest.TestCase):
             with self.subTest(key=key):
                 with self.assertRaisesRegex(config_tool.ConfigError, "sensitive"):
                     config_tool.lookup(data, key)
+
+    def test_internal_routing_keys_are_not_part_of_public_yaml(self) -> None:
+        proxy_case = self.base_config()
+        proxy_case["proxy"]["tls_fetch_scope"] = config_tool.TLS_FETCH_DIRECT_SCOPE
+        with self.assertRaisesRegex(config_tool.ConfigError, "unknown keys in proxy"):
+            config_tool.validate(proxy_case)
+
+        upstream_case = self.base_config()
+        upstream_case["upstreams"] = [
+            {
+                "type": "socks5",
+                "address": "proxy.example.invalid:1080",
+                "scopes": config_tool.TLS_FETCH_DIRECT_SCOPE,
+            }
+        ]
+        with self.assertRaisesRegex(config_tool.ConfigError, r"unknown keys in upstreams\[0\]"):
+            config_tool.validate(upstream_case)
 
     def test_invalid_upstreams_are_rejected_without_leaking_password(self) -> None:
         base = self.base_config()

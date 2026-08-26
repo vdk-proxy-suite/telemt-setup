@@ -18,7 +18,8 @@ import tomllib
 import yaml
 
 
-TOP_KEYS = {"install", "server", "links", "proxy", "users", "probes"}
+REQUIRED_TOP_KEYS = {"install", "server", "links", "proxy", "users", "probes"}
+TOP_KEYS = REQUIRED_TOP_KEYS | {"upstreams"}
 SCHEMA = {
     "install": {
         "version", "architecture", "libc", "sha256", "service_name", "user",
@@ -32,6 +33,7 @@ SCHEMA = {
 }
 MODE_KEYS = {"classic", "secure", "tls"}
 USER_KEYS = {"secret", "ad_tag", "max_unique_ips"}
+UPSTREAM_KEYS = {"type", "address", "username", "password", "weight", "enabled"}
 NAME_RE = re.compile(r"^[a-z_][a-z0-9_-]{0,30}$")
 SERVICE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.@-]{0,63}$")
 HEX32_RE = re.compile(r"^[0-9a-fA-F]{32}$")
@@ -92,6 +94,44 @@ def split_endpoint(value: object, where: str) -> tuple[str, int]:
     return host, port
 
 
+def split_host_endpoint(value: object, where: str) -> tuple[str, int]:
+    if not isinstance(value, str) or not value or value != value.strip() or "\x00" in value:
+        raise ConfigError(f"{where} must have HOST:PORT form")
+
+    if value.startswith("["):
+        match = re.fullmatch(r"\[([^\]]+)\]:([0-9]{1,5})", value)
+        if match is None:
+            raise ConfigError(f"{where} must contain a bracketed IPv6 address and numeric port")
+        host, raw_port = match.groups()
+        try:
+            ipaddress.IPv6Address(host)
+        except ValueError as exc:
+            raise ConfigError(f"{where} contains an invalid IPv6 address") from exc
+    else:
+        if value.count(":") != 1:
+            raise ConfigError(f"{where} must have HOST:PORT form; bracket IPv6 addresses")
+        host, raw_port = value.rsplit(":", 1)
+        if not host or not re.fullmatch(r"[0-9]{1,5}", raw_port):
+            raise ConfigError(f"{where} must contain a host and numeric port")
+        try:
+            ipaddress.ip_address(host)
+        except ValueError:
+            if not HOST_RE.fullmatch(host):
+                raise ConfigError(f"{where} contains an invalid host")
+
+    port = int(raw_port)
+    require_int(port, where + " port", 1, 65535)
+    return host, port
+
+
+def require_socks_credential(value: object, where: str) -> str:
+    if not isinstance(value, str) or not value or "\x00" in value:
+        raise ConfigError(f"{where} must be a non-empty string")
+    if len(value.encode("utf-8")) > 255:
+        raise ConfigError(f"{where} must be at most 255 UTF-8 bytes")
+    return value
+
+
 def require_abs_path(value: object, where: str) -> str:
     if not isinstance(value, str) or not value.startswith("/") or value == "/" or "\x00" in value:
         raise ConfigError(f"{where} must be a safe absolute path other than /")
@@ -102,7 +142,7 @@ def require_abs_path(value: object, where: str) -> str:
 
 def validate(data: dict, yaml_path: Path | None = None) -> dict:
     reject_unknown(data, TOP_KEYS, "root")
-    for section in TOP_KEYS:
+    for section in REQUIRED_TOP_KEYS:
         if section not in data:
             raise ConfigError(f"missing section: {section}")
 
@@ -112,6 +152,9 @@ def validate(data: dict, yaml_path: Path | None = None) -> dict:
     proxy = require_mapping(data, "proxy")
     users = require_mapping(data, "users")
     probes = require_mapping(data, "probes")
+    upstreams = data.get("upstreams", [])
+    if not isinstance(upstreams, list):
+        raise ConfigError("upstreams must be a list")
     for name, mapping in (("install", install), ("server", server), ("links", links), ("proxy", proxy), ("probes", probes)):
         reject_unknown(mapping, SCHEMA[name], name)
 
@@ -181,9 +224,35 @@ def validate(data: dict, yaml_path: Path | None = None) -> dict:
     if modes["tls"] and (not isinstance(proxy.get("tls_domain"), str) or not HOST_RE.fullmatch(proxy["tls_domain"])):
         raise ConfigError("proxy.tls_domain must be a DNS name when TLS mode is enabled")
 
+    has_sensitive_data = False
+    has_enabled_upstream = False
+    for index, upstream in enumerate(upstreams):
+        where = f"upstreams[{index}]"
+        if not isinstance(upstream, dict):
+            raise ConfigError(f"{where} must be a mapping")
+        reject_unknown(upstream, UPSTREAM_KEYS, where)
+        if upstream.get("type") != "socks5":
+            raise ConfigError(f"{where}.type must be socks5")
+        if "address" not in upstream:
+            raise ConfigError(f"missing {where}.address")
+        split_host_endpoint(upstream["address"], f"{where}.address")
+        require_int(upstream.get("weight", 1), f"{where}.weight", 1, 65535)
+        enabled = require_bool(upstream.get("enabled", True), f"{where}.enabled")
+        has_enabled_upstream |= enabled
+
+        username = upstream.get("username")
+        password = upstream.get("password")
+        if (username is None) != (password is None):
+            raise ConfigError(f"{where}.username and {where}.password must be set together")
+        if username is not None:
+            require_socks_credential(username, f"{where}.username")
+            require_socks_credential(password, f"{where}.password")
+            has_sensitive_data = True
+    if upstreams and not has_enabled_upstream:
+        raise ConfigError("upstreams must contain at least one enabled entry")
+
     if not users:
         raise ConfigError("users must contain at least one entry")
-    has_explicit_secret = False
     for username, user in users.items():
         if not isinstance(username, str) or not USER_KEY_RE.fullmatch(username):
             raise ConfigError(f"invalid user key: {username!r}")
@@ -195,19 +264,20 @@ def validate(data: dict, yaml_path: Path | None = None) -> dict:
         secret = user["secret"]
         if secret != "GENERATE" and (not isinstance(secret, str) or not HEX32_RE.fullmatch(secret)):
             raise ConfigError(f"users.{username}.secret must be GENERATE or 32 hex characters")
-        has_explicit_secret |= secret != "GENERATE"
+        has_sensitive_data |= secret != "GENERATE"
         tag = user["ad_tag"]
         if tag is not None and (not isinstance(tag, str) or not HEX32_RE.fullmatch(tag)):
             raise ConfigError(f"users.{username}.ad_tag must be null or 32 hex characters")
+        has_sensitive_data |= tag is not None
         limit = user["max_unique_ips"]
         if limit is not None:
             require_int(limit, f"users.{username}.max_unique_ips", 1, 1_000_000)
 
     require_int(probes.get("timeout_seconds"), "probes.timeout_seconds", 1, 120)
-    if has_explicit_secret and yaml_path is not None and os.name == "posix":
+    if has_sensitive_data and yaml_path is not None and os.name == "posix":
         mode = stat.S_IMODE(yaml_path.stat().st_mode)
         if mode & 0o077:
-            raise ConfigError(f"{yaml_path} contains explicit secrets and must be chmod 600")
+            raise ConfigError(f"{yaml_path} contains sensitive values and must be chmod 600")
     return data
 
 
@@ -229,6 +299,7 @@ def existing_secrets(path: Path | None) -> dict[str, str]:
 
 def render(data: dict, old_secrets: dict[str, str]) -> str:
     install, server, links, proxy, users = (data[k] for k in ("install", "server", "links", "proxy", "users"))
+    upstreams = data.get("upstreams", [])
     resolved: dict[str, str] = {}
     for username, user in users.items():
         configured = user["secret"]
@@ -275,8 +346,24 @@ def render(data: dict, old_secrets: dict[str, str]) -> str:
         f"tls_emulation = {str(proxy['tls_emulation']).lower()}",
         'tls_front_dir = "tlsfront"',
         "",
-        "[access.users]",
     ]
+    for upstream in upstreams:
+        lines.extend([
+            "[[upstreams]]",
+            'type = "socks5"',
+            f"address = {toml_string(upstream['address'])}",
+        ])
+        if upstream.get("username") is not None:
+            lines.extend([
+                f"username = {toml_string(upstream['username'])}",
+                f"password = {toml_string(upstream['password'])}",
+            ])
+        lines.extend([
+            f"weight = {upstream.get('weight', 1)}",
+            f"enabled = {str(upstream.get('enabled', True)).lower()}",
+            "",
+        ])
+    lines.append("[access.users]")
     lines.extend(f"{toml_string(name)} = {toml_string(secret)}" for name, secret in resolved.items())
     tags = {name: user["ad_tag"].lower() for name, user in users.items() if user["ad_tag"] is not None}
     limits = {name: user["max_unique_ips"] for name, user in users.items() if user["max_unique_ips"] is not None}
@@ -291,6 +378,8 @@ def render(data: dict, old_secrets: dict[str, str]) -> str:
 
 
 def lookup(data: dict, key: str) -> object:
+    if key in {"users", "upstreams"} or key.startswith(("users.", "upstreams.")):
+        raise ConfigError(f"config key is sensitive and cannot be printed: {key}")
     if key == "server.api_listen_port":
         return split_endpoint(data["server"]["api_listen"], key)[1]
     if key == "server.metrics_listen_port":

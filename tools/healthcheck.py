@@ -11,6 +11,7 @@ import ssl
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.request
 
 import yaml
@@ -47,6 +48,30 @@ def api_users(config: dict) -> dict:
     return payload
 
 
+def api_ready(config: dict) -> dict:
+    host, port = endpoint(config["server"]["api_listen"])
+    timeout = config["probes"]["timeout_seconds"]
+    url = f"http://{host}:{port}/v1/health/ready"
+    try:
+        body = http_get(url, timeout)
+    except urllib.error.HTTPError as exc:
+        if exc.code != 503:
+            raise
+        body = exc.read()
+    payload = json.loads(body)
+    data = payload.get("data") if isinstance(payload, dict) else None
+    if (
+        not isinstance(payload, dict)
+        or payload.get("ok") is not True
+        or not isinstance(data, dict)
+    ):
+        raise RuntimeError("unexpected /v1/health/ready response shape")
+    if data.get("ready") is not True or data.get("status") != "ready":
+        reason = data.get("reason", "unspecified")
+        raise RuntimeError(f"Telemt is not ready: {reason}")
+    return payload
+
+
 def check_vm(config: dict) -> None:
     service = config["install"]["service_name"] + ".service"
     subprocess.run(["systemctl", "is-active", "--quiet", service], check=True)
@@ -67,6 +92,7 @@ def check_vm(config: dict) -> None:
             with socket.create_connection((connect_host, config["server"]["port"]), timeout=1):
                 pass
             payload = api_users(config)
+            api_ready(config)
             metrics = http_get(f"http://{metrics_host}:{metrics_port}/metrics", 2).decode("utf-8", "replace")
             break
         except Exception as exc:
@@ -86,6 +112,7 @@ def check_vm(config: dict) -> None:
     print(f"PASS vm service: {properties}")
     print(f"PASS proxy listener: {connect_host}:{config['server']['port']}")
     print(f"PASS API: {len(payload['data'])} user record(s), secrets suppressed")
+    print("PASS readiness: admission open and at least one upstream healthy")
     print(f"PASS metrics: {metrics_host}:{metrics_port}/metrics")
 
 

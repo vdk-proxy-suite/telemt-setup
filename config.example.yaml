@@ -36,6 +36,18 @@ proxy:
   mask: true
   tls_emulation: true
 
+# Optional outbound route from Telemt to Telegram. An empty list preserves
+# Telemt's default direct egress. To force all Telegram/ME traffic through an
+# authenticated SOCKS5 proxy, replace [] with the commented structure below.
+upstreams: []
+# upstreams:
+#   - type: "socks5"
+#     address: "proxy.example.invalid:1080"
+#     username: "<PROXY_USER>"
+#     password: "<PROXY_PASSWORD>"
+#     weight: 1
+#     enabled: true
+
 users:
   hello:
     # GENERATE creates a random 32-hex secret on first install and preserves it

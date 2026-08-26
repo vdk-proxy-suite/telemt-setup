@@ -13,7 +13,7 @@ permissions, health-check и отдельный cleaner.
 На новой Ubuntu VM:
 
 ```bash
-unzip telemt-setup-standalone-1.1.1.zip
+unzip telemt-setup-standalone-1.2.0.zip
 cd telemt-setup
 cp config.example.yaml config.yaml
 nano config.yaml
@@ -78,6 +78,41 @@ setup для существующего имени. Удаление устан�
 Смена `proxy.tls_domain` делает ранее выданные TLS-ссылки недействительными —
 после неё пользователям нужно выдать новые ссылки из локального API.
 
+## Исходящий SOCKS5 для MTProto
+
+Опциональный корневой список `upstreams` направляет исходящий тракт самого
+Telemt через SOCKS5, включая MTProto/Telegram Middle-End и обращения TLS-front
+для маскировки. Он не настраивает прокси для сторонних приложений или Telegram
+Bot API; SOCKS5 должен разрешать доступ и к используемому `tls_domain`.
+
+Чтобы жёстко направить весь поддерживаемый Telemt-трафик через один внешний
+SOCKS5, добавьте:
+
+```yaml
+upstreams:
+  - type: "socks5"
+    address: "proxy.example.invalid:1080"
+    username: "<PROXY_USER>"
+    password: "<PROXY_PASSWORD>"
+    weight: 1
+    enabled: true
+```
+
+Поля `username` и `password` можно вместе удалить для SOCKS5 без авторизации.
+Если `upstreams` отсутствует или равен `[]`, Telemt использует обычный прямой
+маршрут. Установщик намеренно не добавляет прямой fallback рядом с SOCKS5:
+несколько enabled-записей Telemt выбирает по весу, поэтому такой fallback мог бы
+незаметно вернуть исходящий трафик на IP виртуальной машины.
+
+SOCKS5 совместим с `proxy.use_middle_proxy: true` в закреплённом Telemt 3.4.23:
+этот маршрут применяется и к TCP-соединениям с Telegram Middle-End. Для ME
+удалённый SOCKS5 должен возвращать корректный публичный `BND.ADDR` и ненулевой
+`BND.PORT`; обычная проверка через `curl --socks5` этого не подтверждает.
+
+YAML с SOCKS5-паролем должен иметь режим `0600`. Сохраняйте
+`proxy.log_level: "normal"`: Telemt 3.4.23 может показать структуру upstream с
+credentials в подробных debug/verbose-логах.
+
 ## Firewall и эксплуатация
 
 Для production-развёртывания откройте в cloud security group только входящий
@@ -87,7 +122,8 @@ TCP/443 и отдельно нужный диапазон для SSH. Telemt н�
 Установщик не меняет cloud firewall и по умолчанию не меняет UFW.
 `install.manage_ufw: true` добавляет локальное allow-правило для proxy TCP-порта.
 Не забудьте разрешить исходящий TCP к инфраструктуре Telegram и GitHub во время
-установки.
+установки. При настроенном `upstreams` VM также должен иметь TCP-доступ к адресу
+SOCKS5.
 
 Проверки на VM:
 
@@ -107,8 +143,9 @@ venv/bin/python tools/healthcheck.py --scope e2e --config config.yaml
 
 В Windows PowerShell используйте `venv\Scripts\python.exe`. E2E проверяет
 публичный TCP, SNI и Fake-TLS handshake. API/metrics и runtime-логи подтверждают
-готовность Telemt и Middle Proxy, но без авторизованного Telegram-клиента тест
-не доказывает доставку сообщений.
+готовность Telemt и Middle Proxy. VM healthcheck также требует успешный ответ
+`/v1/health/ready`, то есть открытый admission и хотя бы один здоровый upstream,
+но без авторизованного Telegram-клиента тест не доказывает доставку сообщений.
 
 ## Обновление
 
@@ -147,6 +184,15 @@ cloud security group и не затрагивает другие экземпл�
 В ZIP намеренно отсутствуют binary Telemt, `config.yaml`, secrets, venv, Git,
 PCAP, runtime cache и отчёты тестовых прогонов.
 
+## Изменения версии 1.2.0
+
+- Добавлен опциональный список SOCKS5 `upstreams` с генерацией корневых
+  `[[upstreams]]` в Telemt TOML
+- Существующие YAML без `upstreams` сохраняют прямой исходящий маршрут
+- Добавлены строгая проверка endpoint/credentials, требование `chmod 600` для
+  YAML с паролем и unit-тесты генератора
+- VM healthcheck теперь проверяет readiness Telemt и наличие здорового upstream
+
 ## Изменения версии 1.1.1
 
 - Production-профили `config.<ssh-alias>.yaml` и локальный `AGENTS.md`
@@ -166,4 +212,6 @@ PCAP, runtime cache и отчёты тестовых прогонов.
 - Telemt: <https://github.com/telemt/telemt>
 - Актуальный пример конфига: <https://github.com/telemt/telemt/blob/main/config.toml>
 - FAQ: <https://github.com/telemt/telemt/blob/main/docs/FAQ.ru.md>
+- Upstream manager Telemt 3.4.23: <https://github.com/telemt/telemt/blob/3.4.23/docs/Advanced_settings/TUNING.en.md>
+- Readiness API Telemt 3.4.23: <https://github.com/telemt/telemt/blob/3.4.23/docs/Architecture/API/API.md>
 - Лицензия: <https://github.com/telemt/telemt/blob/main/LICENSE>

@@ -15,13 +15,14 @@ import urllib.error
 import urllib.request
 
 import yaml
+import config as schema
 
 
 def load(path: Path) -> dict:
     data = yaml.safe_load(path.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
         raise ValueError("invalid YAML")
-    return data
+    return schema.validate(data, path)
 
 
 def endpoint(value: str) -> tuple[str, int]:
@@ -204,10 +205,23 @@ def show_links(config: dict) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--scope", choices=("vm", "e2e", "links"), required=True)
-    parser.add_argument("--config", type=Path, required=True)
+    parser.add_argument("--config", type=Path)
+    parser.add_argument("--instance")
     args = parser.parse_args()
     try:
-        config = load(args.config)
+        if args.config is not None:
+            config_path = args.config
+        elif args.instance:
+            from instance import paths, read_manifest, guard_path
+            if read_manifest(args.instance) is None:
+                raise ValueError("instance ownership manifest missing")
+            config_path = Path(paths(args.instance)["state"]) / "config.yaml"
+            guard_path(config_path, private=True)
+        else:
+            raise ValueError("--config or --instance is required")
+        config = load(config_path)
+        if args.instance and config.get("instance", {}).get("id") != args.instance:
+            raise ValueError("--instance conflicts with config instance.id")
         {"vm": check_vm, "e2e": check_e2e, "links": show_links}[args.scope](config)
         return 0
     except Exception as exc:

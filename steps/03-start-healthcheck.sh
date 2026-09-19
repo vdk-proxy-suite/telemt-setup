@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
+if [[ ${TELEMT_LEGACY:-0} != 1 ]]; then
+  root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+  exec bash "$root/setuptelemt.sh" 3 "$@"
+fi
 source "${ROOT_DIR}/lib/common.sh"
 
 UNIT="$(service_unit)"

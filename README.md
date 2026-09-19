@@ -11,17 +11,25 @@ permissions, health-check и отдельный cleaner.
 
 ## Быстрый запуск
 
-На новой Ubuntu VM:
+На новой Ubuntu VM сначала установите зависимости CLI:
 
 ```bash
-unzip telemt-setup-standalone-1.2.5.zip
+sudo apt-get update
+sudo apt-get install --no-upgrade -y python3 python3-yaml
+```
+
+Затем:
+
+```bash
+unzip telemt-setup-standalone-1.3.0.zip
 cd telemt-setup
 cp config.example.yaml config.yaml
 nano config.yaml
 sudo ./setuptelemt.sh all
 ```
 
-В `config.yaml` обязательно замените `links.public_host` на публичный IPv4 или
+В `config.yaml` задайте уникальный на этой VM `instance.id` (например `main`)
+и обязательно замените `links.public_host` на публичный IPv4 или
 DNS-имя VM. Пример по умолчанию поднимает TLS-only MTProto Proxy на TCP/443 с
 Fake-TLS/SNI `petrovich.ru`, Middle Proxy и общим лимитом 256 соединений.
 
@@ -49,7 +57,10 @@ sudo ./setuptelemt.sh 3  # enable/start и обязательный VM health-ch
 
 `all` запускает шаги последовательно и выполняет rollback при ошибке. Шаг 0
 никогда не останавливает все процессы Telemt: он работает только с
-`install.service_name` и откажется продолжать при конфликте unit или порта.
+`instance.id` и откажется продолжать при конфликте unit, владельца или порта.
+Чужой listener проверяется по фактическому PID до остановки своего unit. Шаги
+1 и 2 отказываются работать поверх активного экземпляра; после 0 → 1 → 2 он
+остаётся остановленным, шаг 3 включает его и проверяет готовность.
 
 ## Пользователи и секреты
 
@@ -73,8 +84,8 @@ setup для существующего имени. Удаление устан�
 следующей чистой установке будет создана новая ссылка.
 
 Если YAML содержит явный secret или `ad_tag`, установщик требует `chmod 600`.
-Сгенерированный `/etc/telemt/telemt.toml` устанавливается как
-`root:telemt 0640`. Ссылки не пишутся в setup-output или journal.
+Сгенерированный `/etc/telemt-setup/instances/<id>/telemt.toml` устанавливается
+как `root:telemt-<id> 0640`. Ссылки не пишутся в setup-output или journal.
 
 Смена `proxy.tls_domain` делает ранее выданные TLS-ссылки недействительными —
 после неё пользователям нужно выдать новые ссылки из локального API.
@@ -168,7 +179,7 @@ SOCKS5, а при `proxy.tls_emulation: true` — прямой TCP/443 и DNS-д
 ```bash
 sudo python3 tools/healthcheck.py --scope vm --config config.yaml
 curl -fsS http://127.0.0.1:9090/metrics
-journalctl -u telemt.service --since "10 minutes ago"
+sudo tail -n 100 /var/log/telemt/instances/main/telemt.log
 ```
 
 Внешний Fake-TLS smoke-test с клиентской машины:
@@ -192,30 +203,129 @@ Telegram-маршрута. Без авторизованного Telegram-кли
 ## Обновление
 
 Укажите новую точную версию и SHA-256 официального release asset в YAML, затем
-повторите `sudo ./setuptelemt.sh all`. Архитектура и libc должны совпадать с VM.
+выполните `sudo ./setuptelemt.sh update --config config.yaml`.
+При ошибке восстанавливаются прежние binary, TOML, YAML, unit, logrotate,
+установленный код setup и предыдущее active/enabled состояние экземпляра. Архитектура и libc должны совпадать с VM.
 Floating `latest` намеренно не используется.
+
+## Изоляция экземпляров и управление
+
+Один ZIP распаковывается в отдельные каталоги. В каждом свой `config.yaml` и
+обязательный `instance.id`: строчная латинская буква, затем буквы, цифры или
+дефисы, всего не более 20 символов. ID не выводится из имени каталога. Соседям
+задайте разные proxy/API/metrics-порты; API и metrics допускают только loopback.
+Порты зарегистрированных остановленных экземпляров также считаются занятыми.
+Параллельные setup не поддерживаются.
+
+Unit/user/group и пути вычисляются из ID; отличающиеся переопределения
+`install.service_name`, `user`, `group` и путей отклоняются.
+
+| Ресурс | Путь / имя |
+|---|---|
+| Unit, user, group | `telemt-<id>.service`, `telemt-<id>` |
+| TOML | `/etc/telemt-setup/instances/<id>/telemt.toml` |
+| Binary | `/opt/telemt-setup/instances/<id>/bin/telemt` |
+| Runtime data | `/var/lib/telemt/instances/<id>` |
+| Runtime directory | `/run/telemt-<id>` |
+| Логи | `/var/log/telemt/instances/<id>/telemt.log` |
+| Logrotate | `/etc/logrotate.d/telemt-<id>` |
+| Manifest, защищённый YAML, backups, staging | `/var/lib/telemt-setup/instances/<id>` |
+| Установленный код setup | `/usr/local/lib/telemt-setup/instances/<id>` |
+
+Новые корни `/etc/telemt-setup` и `/opt/telemt-setup` намеренно отделены от
+старых `/etc/telemt` и `/opt/telemt`: legacy-пользователь владеет рабочим
+каталогом, а его группа ограничивает доступ к старому конфигу. Setup не меняет
+владельца и permissions этих родительских каталогов при установке нового ID.
+
+Root-owned JSON manifest создаётся до системных ресурсов. Он хранит владение,
+UID/GID, происхождение распаковки и незавершённые операции. Чужой существующий
+unit/account, подменённые пути, symlink, hardlink управляемого файла и неизвестные
+drop-ins приводят к отказу. Стандартный `/var/log` root:syslog допускается как
+доверенный системный родитель; собственные корни экземпляров защищены от записи
+посторонними пользователями.
+
+Повторный setup из исходного каталога управляет тем же экземпляром. Перенос или
+копирование каталога с тем же ID требует явного принятия новой распаковки:
+
+```bash
+sudo ./setuptelemt.sh update --config config.yaml --update-existing
+```
+
+Системная идентичность и secrets сохраняются. Новый экземпляр требует нового
+ID. Старый сервис с YAML без `instance` запускается только с `--legacy`, например
+`sudo ./setuptelemt.sh all --legacy --config /secure/legacy.yaml`. Это сохраняет
+его прежние пути и secrets; автоматического присвоения старых ресурсов нет.
+Legacy cleanup также требует `--legacy` и проверяет отсутствие пересечения с
+ресурсами зарегистрированных экземпляров. Обычная legacy-установка и новый
+именованный экземпляр могут работать рядом на разных портах.
+
+Для переноса создайте новый ID с отдельными портами и перенесите нужные secrets
+из старого защищённого TOML в YAML с режимом `0600`. Проверьте новые ссылки,
+после чего отдельно выведите старую установку через её явный legacy-cleanup.
+Изменение TLS-домена требует новых Fake-TLS ссылок. `GENERATE` нового ID не
+импортирует старые secrets автоматически.
+
+Сервис и установленный setup работают после удаления исходной распаковки:
+
+```bash
+sudo /usr/local/lib/telemt-setup/instances/main/setuptelemt.sh status --instance main
+sudo /usr/local/lib/telemt-setup/instances/main/setuptelemt.sh stop --instance main
+sudo /usr/local/lib/telemt-setup/instances/main/setuptelemt.sh start --instance main
+sudo /usr/local/lib/telemt-setup/instances/main/setuptelemt.sh backup --instance main
+sudo /usr/local/lib/telemt-setup/instances/main/setuptelemt.sh healthcheck --instance main
+sudo /usr/local/lib/telemt-setup/instances/main/setuptelemt.sh links --instance main
+```
+
+`all`, `update`, `reconfigure`, `0`–`3` и отдельные `steps/*.sh` принимают тот же
+выбор `--instance`/`--config`. При обоих аргументах ID должны совпадать.
+`reconfigure` применяет YAML без повторного скачивания binary. `stop`, `status`
+и `cleanup --instance` работают по manifest даже без YAML. `backup` не
+останавливает сервис. Ссылки выводятся только явной командой `links`.
+
+Официальный tar.gz можно передать через
+`--release-archive /secure/telemt-x86_64-linux-gnu.tar.gz`; проверка закреплённого
+SHA-256 и версии остаётся обязательной. Временные загрузки находятся в state
+этого экземпляра. Существующие пакеты setup не обновляет; устанавливает только
+отсутствующие зависимости с `apt-get --no-upgrade`.
+
+`install.manage_ufw: true` добавляет маркированное правило только при отсутствии
+готового правила для этого порта. Прежнее правило не становится собственностью
+setup. Удаление своего правила требует отдельного cleanup-флага и проверки
+потребителей. Общие UFW настройки и cloud firewall не изменяются.
 
 ## Очистка
 
-Без `--yes` cleaner только показывает план:
+Без `--yes` cleaner только показывает план и проверяет владельца:
 
 ```bash
-./cleantelemt.sh
-sudo ./cleantelemt.sh --yes
-sudo ./cleantelemt.sh --yes --purge-user --purge-setup
+sudo ./cleantelemt.sh --instance main
+sudo ./cleantelemt.sh --instance main --yes
+sudo ./cleantelemt.sh --instance main --yes --purge-logs
+sudo ./cleantelemt.sh --instance main --yes --purge-shared-components --purge-setup
 ```
 
-Дополнительные варианты:
+Обычная очистка останавливает свой unit и удаляет его, binary, TOML, data,
+runtime, backups и logrotate. Собственные user/group удаляются, если нет
+оставленных config/data, чужих процессов, других аккаунтов группы или чужих
+unit, использующих эту идентичность. Логи сохраняются с владением root.
 
-```bash
-sudo ./cleantelemt.sh --yes --keep-config --keep-data --keep-backups
-sudo ./cleantelemt.sh --yes --purge-ufw
-sudo ./cleantelemt.sh --yes --config /secure/path/telemt.yaml
-```
+- `--purge-logs` удаляет только каталог логов выбранного экземпляра
+- `--purge-shared-components` разрешает удалить доказанно собственное UFW
+  правило; системные пакеты сохраняются, поскольку их исключительное владение
+  и отсутствие внешних потребителей доказать нельзя
+- `--purge-ufw` отдельно разрешает ту же проверку удаления UFW правила
+- `--purge-setup` удаляет исходный каталог распаковки только при совпадении
+  marker, ID, inode и зарегистрированного пути; Git checkout, подменённый или
+  смонтированный каталог не удаляется; при дополнительных файлах (например,
+  setup.log) распаковка сохраняется до совместного --purge-logs
+- `--keep-config`, `--keep-data`, `--keep-backups`, `--keep-user` сохраняют
+  ресурсы; `--purge-user` оставлен как совместимый явный запрос с теми же
+  проверками потребителей
 
-Cleaner удаляет только unit, binary, config, data, state и backups выбранного
-instance. Он не запускает `apt autoremove`, не очищает общий journal, не меняет
-cloud security group и не затрагивает другие экземпляры Telemt.
+Manifest и установленный cleaner сохраняются для повторной очистки, включая
+`--purge-logs` после удаления YAML и исходной распаковки. Cleanup из новой
+распаковки с `--instance main` безопасно повторяется. Общий journal никогда не
+очищается, `apt autoremove` не выполняется, чужие unit/user/файлы не удаляются.
 
 ## Состав архива
 
@@ -225,6 +335,16 @@ cloud security group и не затрагивает другие экземпл�
 
 В ZIP намеренно отсутствуют binary Telemt, `config.yaml`, secrets, venv, Git,
 PCAP, runtime cache и отчёты тестовых прогонов.
+
+## Изменения версии 1.3.0
+
+- Сквозная изоляция по `instance.id`: user/unit, binary, TOML, data, staging,
+  backups, логи и установленный код
+- Единый выбор экземпляра и полный lifecycle, включая отдельные шаги
+- JSON ownership manifest, защита конфликтов и rollback при ошибке
+- Работа после удаления распаковки, повторный cleanup без YAML, отдельные
+  флаги удаления логов и общих компонентов
+- Явный legacy-режим без автоматического присвоения старых ресурсов
 
 ## Изменения версии 1.2.5
 

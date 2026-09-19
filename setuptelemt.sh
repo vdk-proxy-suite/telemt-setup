@@ -2,6 +2,21 @@
 set -Eeuo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Isolated mode is the default. Legacy lifecycle requires an explicit opt-in.
+legacy=false
+forward=()
+for argument in "$@"; do
+  if [[ "$argument" == --legacy ]]; then legacy=true; else forward+=("$argument"); fi
+done
+if [[ "$legacy" != true ]]; then
+  if ! command -v python3 >/dev/null 2>&1 || ! python3 -c 'import yaml' >/dev/null 2>&1; then
+    echo "Python 3 and PyYAML are required: install python3 python3-yaml explicitly" >&2
+    exit 2
+  fi
+  exec python3 "${ROOT_DIR}/tools/instance.py" "${forward[@]}"
+fi
+set -- "${forward[@]}"
+export TELEMT_LEGACY=1
 CONFIG_FILE="${ROOT_DIR}/config.yaml"
 COMMAND="${1:-all}"
 [[ $# -gt 0 ]] && shift || true

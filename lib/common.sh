@@ -10,11 +10,11 @@ require_root() {
 ensure_python_yaml() {
   command -v python3 >/dev/null 2>&1 || {
     apt-get update
-    DEBIAN_FRONTEND=noninteractive apt-get install -y python3 python3-yaml
+    DEBIAN_FRONTEND=noninteractive apt-get install --no-upgrade -y python3 python3-yaml
   }
   python3 -c 'import yaml' >/dev/null 2>&1 || {
     apt-get update
-    DEBIAN_FRONTEND=noninteractive apt-get install -y python3-yaml
+    DEBIAN_FRONTEND=noninteractive apt-get install --no-upgrade -y python3-yaml
   }
 }
 
@@ -24,7 +24,7 @@ cfg() {
 
 validate_config() {
   [[ -f "$CONFIG_FILE" ]] || die "config not found: $CONFIG_FILE"
-  python3 "${ROOT_DIR}/tools/config.py" validate --config "$CONFIG_FILE"
+  python3 "${ROOT_DIR}/tools/config.py" validate --config "$CONFIG_FILE" --legacy
 }
 
 service_unit() { printf '%s.service\n' "$(cfg install.service_name)"; }

@@ -19,7 +19,7 @@ import yaml
 
 
 REQUIRED_TOP_KEYS = {"install", "server", "links", "proxy", "users", "probes"}
-TOP_KEYS = REQUIRED_TOP_KEYS | {"upstreams"}
+TOP_KEYS = REQUIRED_TOP_KEYS | {"upstreams", "instance"}
 SCHEMA = {
     "install": {
         "version", "architecture", "libc", "sha256", "service_name", "user",
@@ -45,6 +45,23 @@ TLS_FETCH_DIRECT_SCOPE = "telemt_setup_tls_front_direct"
 
 class ConfigError(ValueError):
     pass
+
+
+INSTANCE_RE = re.compile(r"^[a-z][a-z0-9-]{0,19}$")
+
+
+def instance_paths(instance_id: str) -> dict[str, str]:
+    if not isinstance(instance_id, str) or not INSTANCE_RE.fullmatch(instance_id):
+        raise ConfigError("instance.id must match [a-z][a-z0-9-]{0,19}")
+    name = "telemt-" + instance_id
+    return {
+        "service_name": name, "user": name, "group": name,
+        "binary_path": f"/opt/telemt-setup/instances/{instance_id}/bin/telemt",
+        "config_path": f"/etc/telemt-setup/instances/{instance_id}/telemt.toml",
+        "work_dir": f"/var/lib/telemt/instances/{instance_id}",
+        "backup_root": f"/var/lib/telemt-setup/instances/{instance_id}/backups",
+        "state_root": f"/var/lib/telemt-setup/instances/{instance_id}",
+    }
 
 
 def load_yaml(path: Path) -> dict:
@@ -149,6 +166,14 @@ def validate(data: dict, yaml_path: Path | None = None) -> dict:
             raise ConfigError(f"missing section: {section}")
 
     install = require_mapping(data, "install")
+    isolated = "instance" in data
+    if isolated:
+        instance = require_mapping(data, "instance")
+        reject_unknown(instance, {"id"}, "instance")
+        for key, expected in instance_paths(instance.get("id")).items():
+            if key in install and install[key] != expected:
+                raise ConfigError(f"install.{key} is derived from instance.id; remove the override")
+            install[key] = expected
     server = require_mapping(data, "server")
     links = require_mapping(data, "links")
     proxy = require_mapping(data, "proxy")
@@ -178,13 +203,13 @@ def validate(data: dict, yaml_path: Path | None = None) -> dict:
             raise ConfigError(f"install.{key} is invalid")
     for key in ("binary_path", "config_path", "work_dir", "backup_root", "state_root"):
         require_abs_path(install[key], "install." + key)
-    if not (install["binary_path"].startswith("/bin/") or install["binary_path"].startswith("/usr/local/")):
+    if not isolated and not (install["binary_path"].startswith("/bin/") or install["binary_path"].startswith("/usr/local/")):
         raise ConfigError("install.binary_path must be under /bin or /usr/local")
     if not install["config_path"].startswith("/etc/"):
         raise ConfigError("install.config_path must be under /etc")
-    if not install["work_dir"].startswith("/opt/"):
+    if not isolated and not install["work_dir"].startswith("/opt/"):
         raise ConfigError("install.work_dir must be under /opt")
-    if not install["backup_root"].startswith("/var/backups/") and install["backup_root"] != "/var/backups/telemt-setup":
+    if not isolated and not install["backup_root"].startswith("/var/backups/") and install["backup_root"] != "/var/backups/telemt-setup":
         raise ConfigError("install.backup_root must be under /var/backups")
     if not install["state_root"].startswith("/var/lib/"):
         raise ConfigError("install.state_root must be under /var/lib")
@@ -196,8 +221,10 @@ def validate(data: dict, yaml_path: Path | None = None) -> dict:
         raise ConfigError("server.listen_ip must be a literal IP") from exc
     require_int(server["port"], "server.port", 1, 65535)
     require_int(server["max_connections"], "server.max_connections", 1, 1_000_000)
-    _, api_port = split_endpoint(server["api_listen"], "server.api_listen")
-    _, metrics_port = split_endpoint(server["metrics_listen"], "server.metrics_listen")
+    api_host, api_port = split_endpoint(server["api_listen"], "server.api_listen")
+    metrics_host, metrics_port = split_endpoint(server["metrics_listen"], "server.metrics_listen")
+    if not all(ipaddress.ip_address(host).is_loopback for host in (api_host, metrics_host)):
+        raise ConfigError("API and metrics must bind to loopback addresses")
     if len({server["port"], api_port, metrics_port}) != 3:
         raise ConfigError("proxy, API and metrics ports must be distinct")
 
@@ -418,12 +445,38 @@ def lookup(data: dict, key: str) -> object:
     return value
 
 
+def guard_legacy_neighbors(data: dict) -> None:
+    """Explicit legacy mode never owns any named instance's parent or identity."""
+    from pathlib import PurePosixPath
+    legacy = data["install"]
+    candidates = [PurePosixPath(legacy[k]) for k in ("binary_path", "config_path", "work_dir", "backup_root")]
+    # Legacy state is state_root/service_name, not the common state_root itself.
+    candidates.append(PurePosixPath(legacy["state_root"]) / legacy["service_name"])
+    for file in Path("/var/lib/telemt-setup/instances").glob("*/manifest.json"):
+        try:
+            manifest = json.loads(file.read_text())
+        except (OSError, ValueError) as exc:
+            raise ConfigError("cannot prove legacy isolation: unreadable instance manifest") from exc
+        owned = manifest.get("paths")
+        if not isinstance(owned, dict):
+            raise ConfigError("cannot prove legacy isolation: malformed instance manifest")
+        if any(legacy[key] == owned.get(key) for key in ("service_name", "user", "group")):
+            raise ConfigError("legacy identity is owned by a named instance")
+        for value in owned.values():
+            if not isinstance(value, str) or not value.startswith("/"):
+                continue
+            path = PurePosixPath(value)
+            if any(path == item or path in item.parents or item in path.parents for item in candidates):
+                raise ConfigError("legacy paths overlap a named instance; use dedicated legacy paths or migrate manually")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest="command", required=True)
     for command in ("validate", "get", "render"):
         item = sub.add_parser(command)
         item.add_argument("--config", type=Path, required=True)
+        item.add_argument("--legacy", action="store_true")
         if command == "get":
             item.add_argument("--key", required=True)
         if command == "render":
@@ -432,6 +485,10 @@ def main() -> int:
     args = parser.parse_args()
     try:
         data = validate(load_yaml(args.config), args.config)
+        if args.legacy and "instance" in data:
+            raise ConfigError("--legacy cannot operate on an isolated instance YAML")
+        if args.legacy:
+            guard_legacy_neighbors(data)
         if args.command == "validate":
             print("configuration is valid")
         elif args.command == "get":

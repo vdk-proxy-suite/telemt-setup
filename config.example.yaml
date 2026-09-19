@@ -1,16 +1,12 @@
+instance:
+  # Unique on this host; the same ZIP may serve multiple explicit IDs.
+  id: "main"
+
 install:
   version: "3.5.7"
   architecture: "x86_64"
   libc: "gnu"
   sha256: "c88656514164dbae64aac68341548b95586a3898df851dad837973752e405864"
-  service_name: "telemt"
-  user: "telemt"
-  group: "telemt"
-  binary_path: "/bin/telemt"
-  config_path: "/etc/telemt/telemt.toml"
-  work_dir: "/opt/telemt"
-  backup_root: "/var/backups/telemt-setup"
-  state_root: "/var/lib/telemt-setup"
   manage_ufw: false
 
 server:

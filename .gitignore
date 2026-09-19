@@ -21,3 +21,8 @@ __pycache__/
 .vscode/
 .DS_Store
 Thumbs.db
+
+# Local verification and source ownership metadata
+tmp/
+dist/
+.telemt-setup-instance.json

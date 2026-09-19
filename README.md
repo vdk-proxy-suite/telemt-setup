@@ -21,7 +21,7 @@ sudo apt-get install --no-upgrade -y python3 python3-yaml
 Затем:
 
 ```bash
-unzip telemt-setup-standalone-1.3.0.zip
+unzip telemt-setup-standalone-1.3.1.zip
 cd telemt-setup
 cp config.example.yaml config.yaml
 nano config.yaml
@@ -335,6 +335,13 @@ Manifest и установленный cleaner сохраняются для п�
 
 В ZIP намеренно отсутствуют binary Telemt, `config.yaml`, secrets, venv, Git,
 PCAP, runtime cache и отчёты тестовых прогонов.
+
+## Изменения версии 1.3.1
+
+- Исправлен порядок проверки владения UFW: повреждённая запись правила или
+  marker другого экземпляра отклоняются до остановки unit и удаления файлов
+- Одна проверка manifest применяется к lifecycle, cleanup dry-run и удалению
+  правила; корректные правила и существующая политика сохранения не изменены
 
 ## Изменения версии 1.3.0
 

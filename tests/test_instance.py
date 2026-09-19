@@ -362,6 +362,37 @@ class LifecycleTests(unittest.TestCase):
             a.cleanup(self.args())
         self.assertTrue(sentinel.exists())
 
+    def test_invalid_ufw_ownership_rejects_before_any_cleanup_mutation(self):
+        a = self.install(self.create("alpha", 24000))
+        invalid_rules = [
+            ["ufw", "allow", "24000/tcp", "comment", "foreign-owner"],
+            ["ufw", "allow", "24000/tcp", "comment", "telemt-setup:beta"],
+            ["ufw", "allow", "0/tcp", "comment", "telemt-setup:alpha"],
+            ["ufw", "allow", "65536/tcp", "comment", "telemt-setup:alpha"],
+            ["ufw", "allow", None, "comment", "telemt-setup:alpha"],
+            [], None, "ufw allow 24000/tcp",
+        ]
+        for rule in invalid_rules:
+            for flags in ((), ("--purge-ufw",), ("--purge-shared-components",)):
+                with self.subTest(rule=rule, flags=flags):
+                    a.manifest["ufw_rule"] = rule
+                    a.save()
+                    before = self.snapshot(a)
+                    offset = len(self.calls)
+                    with self.assertRaisesRegex(schema.ConfigError, "invalid recorded UFW"):
+                        a.cleanup(self.args(*flags))
+                    self.assertEqual(before, self.snapshot(a))
+                    self.assertEqual(self.calls[offset:], [])
+
+    def test_invalid_ufw_ownership_rejects_cleanup_dry_run_without_writes(self):
+        a = self.install(self.create("alpha", 24000))
+        a.manifest["ufw_rule"] = ["ufw", "allow", "24000/tcp", "comment", "telemt-setup:other"]
+        a.save()
+        before = self.snapshot(a)
+        with self.assertRaisesRegex(schema.ConfigError, "invalid recorded UFW"):
+            a.cleanup(lifecycle.parser().parse_args(["cleanup", "--purge-ufw"]))
+        self.assertEqual(before, self.snapshot(a))
+
     def test_owned_firewall_rule_and_preexisting_shared_rule(self):
         a = self.create("alpha", 24000)
         a.data["install"]["manage_ufw"] = True

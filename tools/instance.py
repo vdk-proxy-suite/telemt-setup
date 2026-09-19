@@ -200,6 +200,7 @@ class Instance:
     def verify(self):
         if self.manifest is None:
             raise schema.ConfigError("instance is not registered; run setup with --config")
+        self.owned_ufw_rule()
         for key in RESOURCE_KEYS:
             guard_path(self.p[key], private=key in {"code", "unit", "logrotate", "binary_dir", "config_dir", "logs"})
         for key in ("unit", "logrotate"):
@@ -636,15 +637,26 @@ class Instance:
             self.save()
             raise schema.ConfigError("UFW did not record the expected owned rule")
 
-    def purge_ufw(self):
-        rule = self.manifest.get("ufw_rule")
-        if not rule:
-            return
+    def owned_ufw_rule(self):
+        # Validate durable ownership before any lifecycle mutation, including
+        # cleanup stop/removal. The later purge must use the same contract.
+        if "ufw_rule" not in self.manifest:
+            return None
+        rule = self.manifest["ufw_rule"]
         expected_comment = "telemt-setup:" + self.id
-        if (not isinstance(rule, list) or len(rule) != 5 or rule[:2] != ["ufw", "allow"]
+        if (not isinstance(rule, list) or len(rule) != 5
+                or not all(isinstance(token, str) for token in rule)
+                or rule[:2] != ["ufw", "allow"]
                 or rule[3:] != ["comment", expected_comment]
-                or not __import__("re").fullmatch(r"[0-9]{1,5}/tcp", rule[2])):
+                or not __import__("re").fullmatch(r"[1-9][0-9]{0,4}/tcp", rule[2])
+                or int(rule[2].split("/")[0]) > 65535):
             raise schema.ConfigError("invalid recorded UFW rule")
+        return rule
+
+    def purge_ufw(self):
+        rule = self.owned_ufw_rule()
+        if rule is None:
+            return
         port = int(rule[2].split("/")[0])
         for file in self.state.parent.glob("*/manifest.json"):
             if file.parent.name != self.id:

@@ -1,6 +1,7 @@
 # Standalone Telemt MTProto Proxy
 
-Нативный установщик Telemt для Ubuntu 24.04 x86_64 без Docker. Он следует
+Нативный установщик [Telemt](https://github.com/telemt/telemt) для Ubuntu 24.04
+x86_64 без Docker. Он следует
 [официальной ручной systemd-инструкции](https://github.com/telemt/telemt/blob/main/docs/Quick_start/QUICK_START_GUIDE.ru.md#telemt-%D1%87%D0%B5%D1%80%D0%B5%D0%B7-systemd-%D0%B2%D1%80%D1%83%D1%87%D0%BD%D1%83%D1%8E),
 но добавляет YAML-конфигурацию, проверку релиза, backup/rollback, безопасные
 permissions, health-check и отдельный cleaner.
@@ -13,7 +14,7 @@ permissions, health-check и отдельный cleaner.
 На новой Ubuntu VM:
 
 ```bash
-unzip telemt-setup-standalone-1.2.3.zip
+unzip telemt-setup-standalone-1.2.4.zip
 cd telemt-setup
 cp config.example.yaml config.yaml
 nano config.yaml
@@ -224,6 +225,11 @@ cloud security group и не затрагивает другие экземпл�
 
 В ZIP намеренно отсутствуют binary Telemt, `config.yaml`, secrets, venv, Git,
 PCAP, runtime cache и отчёты тестовых прогонов.
+
+## Изменения версии 1.2.4
+
+- В шапке README добавлена ссылка на оригинальный репозиторий Telemt
+- Закреплённая версия Telemt и поведение установщика не изменены
 
 ## Изменения версии 1.2.3
 

@@ -202,7 +202,7 @@ class LifecycleTests(unittest.TestCase):
             else:
                 raise AssertionError(args)
         elif args[-1] == "--version":
-            out = "Telemt 3.5.7"
+            out = "Telemt 3.5.16"
         elif args[0] == sys.executable and "--scope" in args:
             rc = 1 if self.fail_healthcheck else 0
         else:

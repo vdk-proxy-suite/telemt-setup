@@ -21,7 +21,7 @@ sudo apt-get install --no-upgrade -y python3 python3-yaml
 Затем:
 
 ```bash
-unzip telemt-setup-standalone-1.3.1.zip
+unzip telemt-setup-standalone-1.3.2.zip
 cd telemt-setup
 cp config.example.yaml config.yaml
 nano config.yaml
@@ -131,7 +131,7 @@ weight = 1
 enabled = true
 ```
 
-Пользовательские SOCKS5-записи остаются без `scopes`. В Telemt 3.5.7 запрос без
+Пользовательские SOCKS5-записи остаются без `scopes`. В Telemt 3.5.16 запрос без
 scope может выбрать только unscoped-запись, а запрос с scope — только запись с
 точно совпадающим тегом. Поэтому Telegram/ME не видит внутренний `direct`, а
 TLS-front metadata bootstrap/refresh не видит SOCKS5. `strict_route = true`
@@ -152,7 +152,7 @@ direct не создаётся. Конфигурации без `proxy.tls_domai
 включена, Telemt использует свой домен по умолчанию и получает его метаданные
 через тот же внутренний direct route.
 
-SOCKS5 совместим с `proxy.use_middle_proxy: true` в закреплённом Telemt 3.5.7:
+SOCKS5 совместим с `proxy.use_middle_proxy: true` в закреплённом Telemt 3.5.16:
 этот маршрут применяется и к TCP-соединениям с Telegram Middle-End. Для ME
 удалённый SOCKS5 должен возвращать корректный публичный `BND.ADDR` и ненулевой
 `BND.PORT`; обычная проверка через `curl --socks5` этого не подтверждает.
@@ -336,6 +336,18 @@ Manifest и установленный cleaner сохраняются для п�
 В ZIP намеренно отсутствуют binary Telemt, `config.yaml`, secrets, venv, Git,
 PCAP, runtime cache и отчёты тестовых прогонов.
 
+## Изменения версии 1.3.2
+
+- Закреплён официальный Telemt 3.5.16 для Ubuntu x86_64 GNU
+- SHA-256 release asset сверен с официальным checksum-файлом, GitHub asset
+  digest и независимо вычисленным локальным хешем
+- Сохранены YAML-схема, secrets существующих пользователей и разделение
+  unscoped SOCKS5 / scoped direct для TLS-front; WEB-возможности не включаются
+- Сохранена дополнительная проверка наблюдаемой DC latency для SOCKS5:
+  начальный ответ readiness сам по себе не подтверждает Telegram-связность
+- В upstream управление conntrack теперь выключено по умолчанию; установщик
+  не включает его и не добавляет привилегий сервису
+
 ## Изменения версии 1.3.1
 
 - Исправлен порядок проверки владения UFW: повреждённая запись правила или
@@ -424,7 +436,7 @@ PCAP, runtime cache и отчёты тестовых прогонов.
 - Telemt: <https://github.com/telemt/telemt>
 - Актуальный пример конфига: <https://github.com/telemt/telemt/blob/main/config.toml>
 - FAQ: <https://github.com/telemt/telemt/blob/main/docs/FAQ.ru.md>
-- Upstream manager Telemt 3.5.7: <https://github.com/telemt/telemt/blob/3.5.7/docs/Advanced_settings/TUNING.en.md>
-- `tls_fetch_scope` и `scopes` Telemt 3.5.7: <https://github.com/telemt/telemt/blob/3.5.7/docs/Config_params/CONFIG_PARAMS.ru.md>
-- Readiness API Telemt 3.5.7: <https://github.com/telemt/telemt/blob/3.5.7/docs/Architecture/API/API.md>
+- Upstream manager Telemt 3.5.16: <https://github.com/telemt/telemt/blob/3.5.16/docs/Advanced_settings/TUNING.en.md>
+- `tls_fetch_scope` и `scopes` Telemt 3.5.16: <https://github.com/telemt/telemt/blob/3.5.16/docs/Config_params/CONFIG_PARAMS.ru.md>
+- Readiness API Telemt 3.5.16: <https://github.com/telemt/telemt/blob/3.5.16/docs/Architecture/API/API.md>
 - Лицензия: <https://github.com/telemt/telemt/blob/main/LICENSE>

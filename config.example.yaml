@@ -3,10 +3,10 @@ instance:
   id: "main"
 
 install:
-  version: "3.5.7"
+  version: "3.5.16"
   architecture: "x86_64"
   libc: "gnu"
-  sha256: "c88656514164dbae64aac68341548b95586a3898df851dad837973752e405864"
+  sha256: "e6f46b2f3becf29bfd555cec8a059e429f7c082c1af402499b3a7940cf8ebd34"
   manage_ufw: false
 
 server:

@@ -41,7 +41,7 @@ endpoint — IP либо DNS. A/AAAA остаются DNS-записями, не
 результат разового resolve. `families` задаёт обязательства E2E-проверки, а не
 настройку Telegram-клиента. Выбор адреса и fallback выполняет сам клиент.
 
-Telemt 3.5.16 устанавливает IPV6_V6ONLY: `::` принимает только IPv6; для обеих
+Telemt 3.5.17 устанавливает IPV6_V6ONLY: `::` принимает только IPv6; для обеих
 семей нужны два bind, например `0.0.0.0` и `::`. Setup не меняет sysctl.
 API/metrics остаются только loopback, включая допустимый `[::1]:PORT`.
 
@@ -119,7 +119,7 @@ sudo apt-get install --no-upgrade -y python3 python3-yaml
 Затем:
 
 ```bash
-unzip telemt-setup-standalone-1.4.0.zip
+unzip telemt-setup-standalone-1.4.1.zip
 cd telemt-setup
 cp config.example.yaml config.yaml
 nano config.yaml
@@ -229,7 +229,7 @@ weight = 1
 enabled = true
 ```
 
-Пользовательские SOCKS5-записи остаются без `scopes`. В Telemt 3.5.16 запрос без
+Пользовательские SOCKS5-записи остаются без `scopes`. В Telemt 3.5.17 запрос без
 scope может выбрать только unscoped-запись, а запрос с scope — только запись с
 точно совпадающим тегом. Поэтому Telegram/ME не видит внутренний `direct`, а
 TLS-front metadata bootstrap/refresh не видит SOCKS5. `strict_route = true`
@@ -250,7 +250,7 @@ direct не создаётся. Конфигурации без `proxy.tls_domai
 включена, Telemt использует свой домен по умолчанию и получает его метаданные
 через тот же внутренний direct route.
 
-SOCKS5 совместим с `proxy.use_middle_proxy: true` в закреплённом Telemt 3.5.16:
+SOCKS5 совместим с `proxy.use_middle_proxy: true` в закреплённом Telemt 3.5.17:
 этот маршрут применяется и к TCP-соединениям с Telegram Middle-End. Для ME
 удалённый SOCKS5 должен возвращать корректный публичный `BND.ADDR` и ненулевой
 `BND.PORT`; обычная проверка через `curl --socks5` этого не подтверждает.
@@ -434,6 +434,18 @@ Manifest и установленный cleaner сохраняются для п�
 В ZIP намеренно отсутствуют binary Telemt, `config.yaml`, secrets, venv, Git,
 PCAP, runtime cache и отчёты тестовых прогонов.
 
+## Изменения версии 1.4.1
+
+- Закреплён официальный Telemt 3.5.17 (x86_64 GNU); SHA-256 сверен с asset
+  digest GitHub, официальным checksum-файлом и локальным хешем архива
+- Upstream расширил API состояния конфигурации и отображение пользовательских
+  лимитов; используемые setup API пользователей, readiness и upstream-quality
+  сохраняют совместимость
+- YAML v1/v2, secrets, IPv4/IPv6/DNS-ссылки и scoped TLS-front routing сохранены
+- Новые API остаются за существующим loopback bind; наружу API не открывается
+- Для существующего профиля нужно обновить оба install.version и install.sha256;
+  скачивание нового setup само по себе не меняет pin в вашем приватном YAML
+
 ## Изменения версии 1.4.0
 
 - YAML v2: несколько IPv4/IPv6 binds, DNS/IP endpoint catalogue и primary
@@ -546,7 +558,7 @@ PCAP, runtime cache и отчёты тестовых прогонов.
 - Telemt: <https://github.com/telemt/telemt>
 - Актуальный пример конфига: <https://github.com/telemt/telemt/blob/main/config.toml>
 - FAQ: <https://github.com/telemt/telemt/blob/main/docs/FAQ.ru.md>
-- Upstream manager Telemt 3.5.16: <https://github.com/telemt/telemt/blob/3.5.16/docs/Advanced_settings/TUNING.en.md>
-- `tls_fetch_scope` и `scopes` Telemt 3.5.16: <https://github.com/telemt/telemt/blob/3.5.16/docs/Config_params/CONFIG_PARAMS.ru.md>
-- Readiness API Telemt 3.5.16: <https://github.com/telemt/telemt/blob/3.5.16/docs/Architecture/API/API.md>
+- Upstream manager Telemt 3.5.17: <https://github.com/telemt/telemt/blob/3.5.17/docs/Advanced_settings/TUNING.en.md>
+- `tls_fetch_scope` и `scopes` Telemt 3.5.17: <https://github.com/telemt/telemt/blob/3.5.17/docs/Config_params/CONFIG_PARAMS.ru.md>
+- Readiness API Telemt 3.5.17: <https://github.com/telemt/telemt/blob/3.5.17/docs/Architecture/API/API.md>
 - Лицензия: <https://github.com/telemt/telemt/blob/main/LICENSE>

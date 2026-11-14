@@ -2,10 +2,10 @@ schema_version: 2
 instance:
   id: dev-dual
 install:
-  version: "3.5.16"
+  version: "3.5.17"
   architecture: x86_64
   libc: gnu
-  sha256: e6f46b2f3becf29bfd555cec8a059e429f7c082c1af402499b3a7940cf8ebd34
+  sha256: 0570762ddcd79530d666b09e955b955bb52c9e134cc8b8ed1a0f50ad28d58a0e
   manage_ufw: false
 server:
   listen_ips: ["0.0.0.0", "::"]

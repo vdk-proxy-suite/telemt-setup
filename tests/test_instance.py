@@ -205,7 +205,7 @@ class LifecycleTests(unittest.TestCase):
             else:
                 raise AssertionError(args)
         elif args[-1] == "--version":
-            out = "Telemt 3.5.16"
+            out = "Telemt 3.5.17"
         elif args[0] == sys.executable and "--scope" in args:
             rc = 1 if self.fail_healthcheck else 0
         else:
@@ -394,7 +394,7 @@ class LifecycleTests(unittest.TestCase):
             b.register()
         b.register(update_existing=True)
         self.assertEqual(b.p, a.p)
-        self.assertEqual(b.manifest["source"], str(other))
+        self.assertEqual(b.manifest["source"], str(other.resolve()))
 
     def test_failed_update_restores_config_binary_ports_unit_and_running_state(self):
         a = self.install(self.create("alpha", 24000))

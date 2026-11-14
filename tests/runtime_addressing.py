@@ -30,7 +30,8 @@ def free_port():
 
 
 def run(binary):
-    assert "3.5.16" in subprocess.check_output([binary, "--version"], text=True)
+    pinned = config.load_yaml(ROOT / "config.example.yaml")["install"]["version"]
+    assert pinned in subprocess.check_output([binary, "--version"], text=True)
     with tempfile.TemporaryDirectory(prefix="telemt-addressing-") as temporary:
         root = Path(temporary)
         key, cert = root / "key.pem", root / "cert.pem"

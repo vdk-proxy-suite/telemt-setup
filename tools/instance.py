@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import json
 import secrets
@@ -17,6 +18,8 @@ import time
 
 import yaml
 import config as schema
+import addressing
+import firewall
 
 PROJECT = "telemt-setup"
 ROOT = Path(__file__).resolve().parents[1]
@@ -201,6 +204,7 @@ class Instance:
         if self.manifest is None:
             raise schema.ConfigError("instance is not registered; run setup with --config")
         self.owned_ufw_rule()
+        firewall.validate(self.manifest, self.id)
         for key in RESOURCE_KEYS:
             guard_path(self.p[key], private=key in {"code", "unit", "logrotate", "binary_dir", "config_dir", "logs"})
         for key in ("unit", "logrotate"):
@@ -343,6 +347,19 @@ class Instance:
 
     def check_ports(self):
         import re
+        self.audit_family_rules()
+        if self.data.get("schema_version") == 2:
+            import ipaddress
+            interfaces = json.loads(run("ip", "-j", "address", "show", capture=True).stdout)
+            local = {str(ipaddress.ip_address(address["local"])) for interface in interfaces
+                     for address in interface.get("addr_info", []) if "local" in address}
+            for value in addressing.listen_ips(self.data):
+                if not ipaddress.ip_address(value).is_unspecified and value not in local:
+                    raise schema.ConfigError("configured listener IP is not assigned locally; no service was stopped")
+            if self.data["install"]["manage_ufw"] and any(addressing.family(ip) == "ipv6" for ip in addressing.listen_ips(self.data)):
+                settings = Path("/etc/default/ufw").read_text()
+                if not re.search(r"(?m)^\s*IPV6\s*=\s*yes\s*$", settings):
+                    raise schema.ConfigError("UFW IPv6 is disabled; enable it explicitly before dual-stack setup")
         desired = {self.data["server"]["port"], schema.split_endpoint(self.data["server"]["api_listen"], "API")[1], schema.split_endpoint(self.data["server"]["metrics_listen"], "metrics")[1]}
         # Registered instances reserve their ports even while stopped.
         registry = self.state.parent
@@ -365,6 +382,7 @@ class Instance:
     def backup(self, stop=False):
         self.verify()
         previous_ports = list(self.manifest.get("ports", []))
+        previous_firewall = copy.deepcopy({key: self.manifest[key] for key in ("ufw_rule", "ufw_rules", "addressing_schema", "binds") if key in self.manifest})
         self.check_ports()
         destination = self.state / "backups" / str(time.time_ns())
         guard_path(destination, private=True)
@@ -379,8 +397,11 @@ class Instance:
             shutil.copytree(self.p["code"], destination / "code")
         prior = {"directory": str(destination), "files": files, "active": self.active(),
                  "enabled": run("systemctl", "is-enabled", "--quiet", self.p["service_name"] + ".service", check=False, capture=True).returncode == 0,
-                 "hashes": dict(self.manifest["hashes"]), "ports": previous_ports}
+                 "hashes": dict(self.manifest["hashes"]), "ports": previous_ports,
+                 "firewall": previous_firewall}
         write_private(destination / "backup.json", json.dumps(prior, indent=2))
+        self.manifest["last_backup"] = prior
+        self.save()
         if stop:
             self.manifest["rollback"] = prior
             self.manifest["status"] = "preparing"
@@ -390,15 +411,44 @@ class Instance:
                 raise schema.ConfigError("target service did not stop")
         print("backup:", destination)
 
-    def rollback(self):
-        previous = self.manifest.get("rollback")
+    def rollback(self, explicit=False):
+        previous = self.manifest.get("rollback") or (self.manifest.get("last_backup") if explicit else None)
         if not previous:
+            if explicit:
+                raise schema.ConfigError("no retained backup is available for rollback")
             return
         destination = guard_path(previous["directory"], private=True)
         if destination.parent != self.state / "backups":
             raise schema.ConfigError("invalid rollback backup path")
         unit = self.p["service_name"] + ".service"
         run("systemctl", "stop", unit, check=False, capture=True)
+        if "firewall" in previous:
+            snapshot = previous["firewall"]
+            current_legacy = self.owned_ufw_rule()
+            prior_legacy = snapshot.get("ufw_rule")
+            if current_legacy and current_legacy != prior_legacy:
+                self.purge_legacy_ufw()
+                if "ufw_rule" in self.manifest:
+                    raise schema.ConfigError("cannot rollback retained legacy firewall rule")
+            for rule in list(firewall.validate(self.manifest, self.id)):
+                if rule not in snapshot.get("ufw_rules", []):
+                    self.remove_family_rule(rule)
+            # A removed prior rule may have been restored by an external actor; never claim a different marker.
+            current = self.family_ufw_rules() if snapshot.get("ufw_rules") or self.manifest.get("ufw_rules") else []
+            for rule in snapshot.get("ufw_rules", []):
+                if not any(firewall.same(rule, other) for other in current):
+                    if any(firewall.covers(other, rule) for other in current):
+                        raise schema.ConfigError("cannot restore owned firewall rule over foreign allowance")
+                    run(*rule)
+            if prior_legacy and prior_legacy != current_legacy:
+                rules = self.ufw_rules()
+                if prior_legacy not in rules:
+                    if any(firewall.covers(other, prior_legacy) for other in rules):
+                        raise schema.ConfigError("cannot restore legacy firewall ownership over foreign rule")
+                    run(*prior_legacy)
+            for key in ("ufw_rule", "ufw_rules", "addressing_schema", "binds"):
+                self.manifest.pop(key, None)
+            self.manifest.update(snapshot)
         for key, target in {"binary": self.p["binary_path"], "toml": self.p["config_path"], "unit": self.p["unit"], "logrotate": self.p["logrotate"], "yaml": self.config}.items():
             target = guard_path(target, private=True)
             if previous["files"][key]:
@@ -414,6 +464,7 @@ class Instance:
         self.manifest["ports"] = previous["ports"]
         self.manifest["status"] = "rolled-back"
         self.manifest.pop("rollback", None)
+        self.manifest.pop("last_backup", None)
         self.save()
         run("systemctl", "daemon-reload")
         run("systemctl", "enable" if previous["enabled"] else "disable", unit, check=False, capture=True)
@@ -559,6 +610,10 @@ class Instance:
         print(f"  keep ownership and cleanup controller: {self.state}, {self.p['code']}")
         if args.purge_setup:
             print(f"  purge verified extraction if no protected logs: {self.manifest['source']}")
+        if args.purge_ufw or args.purge_shared_components:
+            self.audit_family_rules()
+            for rule in firewall.validate(self.manifest, self.id):
+                print("  purge owned UFW:", " ".join(rule))
         if not args.yes:
             print("dry run; use --yes to apply")
             return
@@ -611,6 +666,11 @@ class Instance:
 
     def configure_ufw(self):
         import ipaddress
+        if self.data.get("schema_version") == 2:
+            self.configure_family_rules()
+            return
+        for record in list(firewall.validate(self.manifest, self.id)):
+            self.remove_family_rule(record)
         if ipaddress.ip_address(self.data["server"]["listen_ip"]).is_loopback:
             print("loopback listener: no public UFW rule needed")
             return
@@ -654,6 +714,11 @@ class Instance:
         return rule
 
     def purge_ufw(self):
+        for record in list(firewall.validate(self.manifest, self.id)):
+            self.remove_family_rule(record)
+        self.purge_legacy_ufw()
+
+    def purge_legacy_ufw(self):
         rule = self.owned_ufw_rule()
         if rule is None:
             return
@@ -674,6 +739,87 @@ class Instance:
         run("ufw", "--force", "delete", *rule[1:])
         self.manifest.pop("ufw_rule", None)
         self.save()
+
+    def remove_family_rule(self, rule):
+        port = firewall.parse(rule)["port"]
+        for file in self.state.parent.glob("*/manifest.json"):
+            if file.parent.name != self.id:
+                other = read_manifest(file.parent.name)
+                if other and other.get("status") != "removed" and port in other.get("ports", []):
+                    raise schema.ConfigError("owned UFW rule has another registered consumer")
+        if run("ss", "-H", "-lntp", f"sport = :{port}", capture=True).stdout.strip():
+            raise schema.ConfigError("owned UFW port is still in use; rule retained")
+        existing = self.family_ufw_rules()
+        matching = [item for item in existing if firewall.same(item, rule)]
+        if not matching and not any(firewall.covers(item, rule) for item in existing):
+            # Intent may have been saved before a failed ufw add, or a previous
+            # cleanup may have deleted it before saving the manifest.
+            self.manifest["ufw_rules"].remove(rule)
+            self.save()
+            return
+        if len(matching) != 1:
+            raise schema.ConfigError("owned UFW rule missing/changed/ambiguous; ownership retained")
+        # Use the explicit-family command, not show-added shorthand that deletes both families.
+        run("ufw", "--force", "delete", *rule[1:])
+        self.manifest["ufw_rules"].remove(rule)
+        self.save()
+
+    def configure_family_rules(self):
+        owned = list(firewall.validate(self.manifest, self.id))
+        wanted = firewall.desired(self.data, self.id)
+        legacy = self.owned_ufw_rule()
+        # Retain an old broad rule only while the new binds still require both
+        # wildcard families on that port. Otherwise remove owned excess access.
+        if legacy:
+            broad = {firewall.parse(rule)["src"].version for rule in wanted
+                     if firewall.parse(rule)["dst"].prefixlen == 0
+                     and firewall.parse(rule)["port"] == firewall.parse(legacy)["port"]}
+            if broad != {4, 6}:
+                self.purge_legacy_ufw()
+                if "ufw_rule" in self.manifest:
+                    raise schema.ConfigError("legacy UFW rule retained; cannot safely narrow listener exposure")
+                legacy = None
+        self.manifest["addressing_schema"] = 2
+        self.manifest["binds"] = addressing.listen_ips(self.data)
+        self.manifest.setdefault("ufw_rules", [])
+        self.save()
+        for rule in owned:
+            if not any(firewall.same(rule, item) for item in wanted):
+                self.remove_family_rule(rule)
+        for rule in wanted:
+            existing = self.family_ufw_rules()
+            matches = [item for item in existing if firewall.same(item, rule)]
+            if matches:
+                if legacy and firewall.covers(legacy, rule) and len(matches) == 1:
+                    continue
+                if len(matches) != 1 or not any(firewall.same(rule, item) for item in self.manifest["ufw_rules"]):
+                    raise schema.ConfigError("matching UFW marker exists without exclusive ownership")
+                continue
+            if any(firewall.covers(item, rule) for item in existing):
+                print("preexisting UFW allowance retained without ownership")
+                continue
+            if rule in self.manifest["ufw_rules"]:
+                raise schema.ConfigError("recorded UFW rule disappeared; refusing silent replacement")
+            self.manifest["ufw_rules"].append(rule)
+            self.save()
+            run(*rule)
+            if not any(firewall.same(item, rule) for item in self.family_ufw_rules()):
+                raise schema.ConfigError("UFW did not record the expected family rule")
+
+    def family_ufw_rules(self):
+        for name in ("user.rules", "user6.rules"):
+            guard_path(Path("/etc/ufw") / name, private=True)
+        return firewall.saved_rules()
+
+    def audit_family_rules(self):
+        owned = firewall.validate(self.manifest, self.id)
+        if not owned:
+            return
+        existing = self.family_ufw_rules()
+        for rule in owned:
+            matches = [item for item in existing if firewall.same(rule, item)]
+            if len(matches) > 1 or (not matches and any(firewall.covers(item, rule) for item in existing)):
+                raise schema.ConfigError("owned UFW rule changed/ambiguous; no service was stopped")
 
     def account_consumers(self):
         import re
@@ -765,11 +911,13 @@ WantedBy=multi-user.target
 
 def parser():
     result = argparse.ArgumentParser(description=__doc__)
-    result.add_argument("command", nargs="?", default="all", choices=[*sorted(MUTATING), "status", "healthcheck", "links", "cleanup"])
+    result.add_argument("command", nargs="?", default="all", choices=[*sorted(MUTATING), "status", "healthcheck", "links", "cleanup", "rollback"])
     result.add_argument("--instance")
     result.add_argument("--config", type=Path)
     result.add_argument("--update-existing", action="store_true")
     result.add_argument("--release-archive", type=Path, help="offline official tar.gz; pinned SHA-256 remains mandatory")
+    result.add_argument("--endpoint", help="links endpoint selector")
+    result.add_argument("--format", choices=("json", "text"), default="json", help="links output format")
     for flag in ("yes", "keep-config", "keep-data", "keep-backups", "keep-user", "purge-user", "purge-setup", "purge-logs", "purge-shared-components", "purge-ufw"):
         result.add_argument("--" + flag, action="store_true")
     return result
@@ -799,6 +947,8 @@ def main(argv=None):
     instance = None
     rollback_allowed = False
     try:
+        if args.command != "links" and (args.endpoint or args.format != "json"):
+            raise schema.ConfigError("--endpoint and --format require links")
         instance_id, data = select(args)
         instance = Instance(instance_id, data)
         if os.name != "posix" or os.geteuid() != 0:
@@ -809,6 +959,10 @@ def main(argv=None):
         if args.command in {"stop", "status"}:
             instance.verify()
             return run("systemctl", args.command, *( ["--no-pager"] if args.command == "status" else [] ), instance.p["service_name"] + ".service", check=False).returncode
+        if args.command == "rollback":
+            instance.verify()
+            instance.rollback(explicit=True)
+            return 0
         if instance.data is None:
             guard_path(instance.config, private=True)
             instance.data = schema.validate(schema.load_yaml(instance.config), instance.config)
@@ -836,7 +990,12 @@ def main(argv=None):
         if args.command == "backup":
             instance.backup()
         if args.command in {"healthcheck", "links"}:
-            return run(sys.executable, Path(instance.p["code"]) / "tools/healthcheck.py", "--scope", "vm" if args.command == "healthcheck" else "links", "--config", instance.config, check=False).returncode
+            extra = []
+            if args.command == "links":
+                extra = ["--format", args.format]
+                if args.endpoint:
+                    extra += ["--endpoint", args.endpoint]
+            return run(sys.executable, Path(instance.p["code"]) / "tools/healthcheck.py", "--scope", "vm" if args.command == "healthcheck" else "links", "--config", instance.config, *extra, check=False).returncode
         return 0
     except (schema.ConfigError, OSError, ValueError, subprocess.CalledProcessError) as exc:
         print(f"telemt instance error: {exc}", file=sys.stderr)

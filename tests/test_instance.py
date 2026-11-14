@@ -112,6 +112,7 @@ class LifecycleTests(unittest.TestCase):
             patch.object(lifecycle, "paths", side_effect=self.paths),
             patch.object(lifecycle, "guard_path", side_effect=self.guard),
             patch.object(lifecycle, "run", side_effect=self.command),
+            patch.object(lifecycle.Instance, "family_ufw_rules", lambda item: item.ufw_rules()),
             patch.object(lifecycle.os, "chown", create=True),
             patch.dict(sys.modules, {"pwd": SimpleNamespace(getpwnam=self.user, getpwall=lambda: list(self.users.values())), "grp": SimpleNamespace(getgrnam=self.group)}),
         ]
@@ -173,6 +174,8 @@ class LifecycleTests(unittest.TestCase):
         elif args[0] == "ss":
             port = int(args[-1].split(":")[-1])
             out = self.sockets.get(port, "")
+        elif args[:4] == ["ip", "-j", "address", "show"]:
+            out = json.dumps([{"addr_info": [{"local": "127.0.0.1"}, {"local": "::1"}, {"local": "192.0.2.10"}, {"local": "2001:db8::10"}]}])
         elif args[0] == "groupadd":
             self.seq += 1
             self.groups[args[-1]] = SimpleNamespace(gr_gid=self.seq, gr_mem=[])
@@ -234,6 +237,116 @@ class LifecycleTests(unittest.TestCase):
         item.configure()
         item.start()
         return item
+
+    def test_v2_upgrade_firewall_rollback_preserves_v1_and_neighbor(self):
+        a = self.install(self.create("alpha", 24000))
+        b = self.install(self.create("beta", 25000))
+        neighbor = self.snapshot(b)
+        old_yaml = a.config.read_bytes()
+        old_secret = schema.existing_secrets(Path(a.p["config_path"]))
+        a.data["schema_version"] = 2
+        a.data["server"].pop("listen_ip")
+        a.data["server"]["listen_ips"] = ["192.0.2.10", "2001:db8::10"]
+        a.data["links"] = {"primary": "dns", "endpoints": [dict(id="dns", host="proxy.example.org", port=24000, families=["ipv4", "ipv6"])]}
+        schema.validate(a.data)
+        a.backup(stop=True)
+        a.persist_source()
+        a.configure()
+        a.configure_family_rules()
+        self.assertEqual(len(self.ufw), 2)
+        self.assertEqual(schema.existing_secrets(Path(a.p["config_path"])), old_secret)
+        a.rollback()
+        self.assertEqual(self.ufw, [])
+        self.assertEqual(a.config.read_bytes(), old_yaml)
+        self.assertEqual(self.snapshot(b), neighbor)
+        self.assertTrue(a.active())
+        self.assertNotIn("ufw_rules", a.manifest)
+
+    def test_family_cleanup_retains_foreign_marker_before_deletion(self):
+        import firewall
+        a = self.install(self.create("alpha", 24000))
+        a.data["schema_version"] = 2
+        a.data["server"]["listen_ips"] = ["192.0.2.10", "2001:db8::10"]
+        a.configure_family_rules()
+        self.assertEqual(len(self.ufw), 2)
+        self.ufw[0] = [*self.ufw[0][:-1], "foreign-owner"]
+        with self.assertRaisesRegex(schema.ConfigError, "missing/changed/ambiguous"):
+            a.remove_family_rule(a.manifest["ufw_rules"][0])
+        self.assertEqual(len(self.ufw), 2)
+
+    def test_v2_bind_preflight_rejects_unassigned_address_before_stop(self):
+        a = self.install(self.create("alpha", 24000))
+        a.data["schema_version"] = 2
+        a.data["server"]["listen_ips"] = ["192.0.2.99"]
+        with self.assertRaisesRegex(schema.ConfigError, "not assigned locally"):
+            a.backup(stop=True)
+        self.assertTrue(a.active())
+
+    def v2_data(self, item):
+        item.data["schema_version"] = 2
+        item.data["server"].pop("listen_ip", None)
+        item.data["server"]["listen_ips"] = ["192.0.2.10", "2001:db8::10"]
+        item.data["links"] = {"primary": "dns", "endpoints": [dict(id="dns", host="proxy.example.org", port=item.data["server"]["port"], families=["ipv4", "ipv6"])]}
+        schema.validate(item.data)
+
+    def test_legacy_owned_firewall_restored_after_narrowing_rollback(self):
+        a = self.install(self.create("alpha", 24000))
+        a.configure_ufw()
+        original = copy.deepcopy(self.ufw)
+        self.v2_data(a)
+        a.backup(stop=True)
+        a.configure_family_rules()
+        self.assertEqual(len(self.ufw), 2)
+        self.assertNotIn("ufw_rule", a.manifest)
+        a.rollback()
+        self.assertEqual(self.ufw, original)
+        self.assertEqual(a.manifest["ufw_rule"], original[0])
+
+    def test_failed_ufw_add_does_not_prevent_config_rollback(self):
+        a = self.install(self.create("alpha", 24000))
+        original = a.config.read_bytes()
+        self.v2_data(a)
+        a.backup(stop=True); a.persist_source(); a.configure()
+        def fail_add(*args, **kwargs):
+            if args[:2] == ("ufw", "allow"):
+                raise subprocess.CalledProcessError(1, args)
+            return self.command(*args, **kwargs)
+        with patch.object(lifecycle, "run", side_effect=fail_add):
+            with self.assertRaises(subprocess.CalledProcessError): a.configure_family_rules()
+            a.rollback()
+        self.assertEqual(a.config.read_bytes(), original)
+        self.assertEqual(self.ufw, [])
+        self.assertTrue(a.active())
+
+    def test_full_v2_cleanup_and_repeat_preserve_shared_allowance(self):
+        a = self.install(self.create("alpha", 24000))
+        b = self.install(self.create("beta", 25000)); neighbor = self.snapshot(b)
+        self.v2_data(a)
+        a.configure_family_rules()
+        self.assertEqual(len(self.ufw), 2)
+        a.cleanup(self.args("--purge-ufw", "--purge-logs"))
+        a.cleanup(self.args("--purge-ufw", "--purge-logs"))
+        self.assertEqual(self.ufw, [])
+        self.assertEqual(self.snapshot(b), neighbor)
+
+    def test_foreign_rule_detected_before_cleanup_stop(self):
+        a = self.install(self.create("alpha", 24000)); self.v2_data(a)
+        a.configure_family_rules()
+        self.ufw[1][-1] = "foreign-owner"
+        original = self.snapshot(a)
+        with self.assertRaisesRegex(schema.ConfigError, "changed/ambiguous"):
+            a.cleanup(self.args("--purge-ufw"))
+        self.assertEqual(self.snapshot(a), original)
+
+    def test_explicit_rollback_available_after_successful_start(self):
+        a = self.install(self.create("alpha", 24000))
+        old = a.config.read_bytes()
+        self.v2_data(a)
+        a.backup(stop=True); a.persist_source(); a.configure(); a.start()
+        self.assertNotIn("rollback", a.manifest)
+        a.rollback(explicit=True)
+        self.assertEqual(a.config.read_bytes(), old)
+        self.assertTrue(a.active())
 
     def args(self, *extra):
         return lifecycle.parser().parse_args(["cleanup", "--yes", *extra])

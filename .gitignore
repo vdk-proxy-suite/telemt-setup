@@ -2,6 +2,7 @@
 AGENTS.md
 config*.yaml
 !config.example.yaml
+!config.dualstack.example.yaml
 .env
 .env.*
 !.env.example
@@ -24,5 +25,6 @@ Thumbs.db
 
 # Local verification and source ownership metadata
 tmp/
+.test-work/
 dist/
 .telemt-setup-instance.json

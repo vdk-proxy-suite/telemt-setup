@@ -10,7 +10,7 @@ import zipfile
 
 
 EXECUTABLE_NAMES = {"setuptelemt.sh", "cleantelemt.sh"}
-EXCLUDED_NAMES = {"AGENTS.md", "__pycache__", ".git", ".agents", "tests", "venv", ".venv", "tmp", "dist", ".pytest_cache", "reports", ".telemt-setup-instance.json"}
+EXCLUDED_NAMES = {"AGENTS.md", "__pycache__", ".git", ".agents", "tests", "venv", ".venv", "tmp", ".test-work", "dist", ".pytest_cache", "reports", ".telemt-setup-instance.json"}
 
 
 def excluded(path: Path) -> bool:

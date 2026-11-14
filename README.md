@@ -9,6 +9,104 @@ permissions, health-check и отдельный cleaner.
 Это неофициальный установщик. Бинарник Telemt в ZIP не включён: setup скачивает
 официальный закреплённый релиз и проверяет SHA-256.
 
+## IPv4, IPv6 и доменные ссылки (1.4.0)
+
+`config.dualstack.example.yaml` использует `schema_version: 2`: несколько
+`server.listen_ips` на одном `server.port`, каталог `links.endpoints` и
+`links.primary`. Один пользователь получает DNS/IPv4/IPv6 варианты с тем же
+secret. Старые YAML без schema_version работают без миграции.
+
+```yaml
+schema_version: 2
+server:
+  listen_ips: ["0.0.0.0", "::"]
+  port: 24443
+  max_connections: 256
+  api_listen: "127.0.0.1:24991"
+  metrics_listen: "127.0.0.1:24990"
+links:
+  primary: dns
+  endpoints:
+    - {id: dns, host: proxy.example.org, port: 24443, families: [ipv4, ipv6]}
+    - {id: ipv4, host: "192.0.2.10", port: 24443, families: [ipv4]}
+    - {id: ipv6, host: "2001:db8::10", port: 24443, families: [ipv6]}
+outbound:
+  families: [ipv4]
+  prefer: ipv4
+```
+
+Это фрагмент; полный пример содержит install/proxy/users/probes. Замените
+документационные hosts перед установкой. Bind принимает только локальный IP,
+endpoint — IP либо DNS. A/AAAA остаются DNS-записями, не фиксируются в TOML как
+результат разового resolve. `families` задаёт обязательства E2E-проверки, а не
+настройку Telegram-клиента. Выбор адреса и fallback выполняет сам клиент.
+
+Telemt 3.5.16 устанавливает IPV6_V6ONLY: `::` принимает только IPv6; для обеих
+семей нужны два bind, например `0.0.0.0` и `::`. Setup не меняет sysctl.
+API/metrics остаются только loopback, включая допустимый `[::1]:PORT`.
+
+Входящая семья и исходящая независимы. В v2 `outbound` по умолчанию разрешает
+только IPv4 и предпочитает IPv4; для dual-stack egress укажите обе семьи и
+выберите prefer из них. Эти flags ограничивают Telegram upstream routes.
+Внутренний scoped direct TLS-front сохраняет IPv4. Не включайте IPv6 egress у
+IPv4-only parent. Для локального 3proxy → HTTP(S) parent сохраняйте
+`use_middle_proxy: false`; IPv6 с Middle Proxy требует отдельной клиентской
+приёмки (upstream отмечает этот режим экспериментальным).
+
+В v2 при TLS-emulation этот scoped TLS-front route создаётся и без SOCKS,
+чтобы выбор IPv6-only Telegram egress не отключал получение TLS metadata.
+В v1 поведение без upstream остаётся прежним.
+
+`proxy.tls_domain` — домен маскировки, а `links.*.host` — адрес подключения.
+Менять tls_domain на собственный домен или выпускать ACME сертификат для
+доменной MTProto ссылки не требуется. WEB transport в этом релизе не включён.
+Добавление адресов не меняет secrets; прежняя IPv4-ссылка остаётся действующей
+при сохранении IP/порта, режима и tls_domain. Уже импортированный IP не
+превращается в DNS автоматически.
+
+Для v2 команда links формирует каталог из активного `/v1/users`, проверяя
+имена, режимы, secret и tls_domain; при рассогласовании отказывает, ничего не
+перегенерирует. Native API не меняется и использует primary endpoint.
+
+```bash
+sudo ./setuptelemt.sh links --instance dev-dual --format text
+sudo ./setuptelemt.sh links --instance dev-dual --endpoint dns --format json
+python3 tools/healthcheck.py --config config.yaml --scope e2e --json result.json
+python3 tools/healthcheck.py --config config.yaml --scope e2e --endpoint dns --family ipv6 --timeout 8
+```
+
+Links — credential-bearing вывод только по явному запросу. JSON healthcheck
+не содержит secrets, создаётся как новый файл без перезаписи существующего.
+Матрица проходит каждую заявленную семью и каждый DNS-адрес (до 16 на семью),
+не скрывает отказ IPv6 за успехом IPv4. DNS/connect/handshake ошибки и фильтры
+видны в отчёте; непроверенные семьи помечаются SKIP. Общий бюджет ограничен
+300 секундами, `--timeout` — до 60 секунд на операцию. Это TLS camouflage smoke
+с отключённой проверкой PKI, а не authenticated MTProto: доставка сообщений
+проверяется отдельно в настоящем Telegram-клиенте.
+
+v2 требует named instance. Не смешивайте listen_ip с listen_ips или старые
+public_host/public_port с endpoints. Между instance сохраняется резервирование
+целых портов, даже если они остановлены. Каждому ID нужна отдельная распаковка.
+
+UFW правила v2 учитывают семью и bind, loopback не открывается. Для проверки
+ownership читаются сохранённые `/etc/ufw/user.rules` и `user6.rules`: `show added`
+может скрывать семейство сокращением. Изменения выполняются только через UFW CLI.
+Чужие/предсуществующие правила не присваиваются. При manage_ufw=true и IPv6
+требуется заранее включённая IPv6-поддержка UFW; setup не переключает её глобально.
+Backup включает firewall ownership; rollback возвращает изменения выбранной
+операции. Изменённый чужой marker останавливает очистку до остановки сервиса.
+
+После успешного обновления доступен явный откат к последнему backup:
+
+```bash
+sudo ./setuptelemt.sh rollback --instance dev-dual
+```
+
+Откат восстанавливает прежний код, TOML/YAML, binary, unit и active/enabled state.
+Это может вернуть управляющий код старой версии. Backups содержат secrets.
+При внешнем изменении owned firewall state откат отказывает в небезопасном
+действии; сохранённый manifest позволяет разобраться, не удаляя чужие правила.
+
 ## Быстрый запуск
 
 На новой Ubuntu VM сначала установите зависимости CLI:
@@ -21,7 +119,7 @@ sudo apt-get install --no-upgrade -y python3 python3-yaml
 Затем:
 
 ```bash
-unzip telemt-setup-standalone-1.3.2.zip
+unzip telemt-setup-standalone-1.4.0.zip
 cd telemt-setup
 cp config.example.yaml config.yaml
 nano config.yaml
@@ -335,6 +433,18 @@ Manifest и установленный cleaner сохраняются для п�
 
 В ZIP намеренно отсутствуют binary Telemt, `config.yaml`, secrets, venv, Git,
 PCAP, runtime cache и отчёты тестовых прогонов.
+
+## Изменения версии 1.4.0
+
+- YAML v2: несколько IPv4/IPv6 binds, DNS/IP endpoint catalogue и primary
+- Явная outbound policy отделяет входящий IPv6 от Telegram egress
+- Старые YAML и secrets сохраняются; native Telemt остаётся закреплённым 3.5.16
+- Каталог ссылок с проверкой активных secrets, IPv6 URL и CLI-фильтром endpoint
+- E2E-матрица по адресам/семьям, ограниченные timeout, JSON без credentials
+- VM-проверка всех binds и MainPID, API/metrics на IPv6 loopback
+- Семейства UFW, ownership, восстановление firewall при rollback и явный rollback CLI
+- Windows/Linux unit tests и disposable WSL runtime; Telegram client acceptance
+  выполняется на dev-стенде до переключения production
 
 ## Изменения версии 1.3.2
 

@@ -16,10 +16,11 @@ import sys
 import tomllib
 
 import yaml
+import addressing
 
 
 REQUIRED_TOP_KEYS = {"install", "server", "links", "proxy", "users", "probes"}
-TOP_KEYS = REQUIRED_TOP_KEYS | {"upstreams", "instance"}
+TOP_KEYS = REQUIRED_TOP_KEYS | {"upstreams", "instance", "schema_version", "outbound"}
 SCHEMA = {
     "install": {
         "version", "architecture", "libc", "sha256", "service_name", "user",
@@ -159,8 +160,78 @@ def require_abs_path(value: object, where: str) -> str:
     return value
 
 
+def validate_addresses_v2(data: dict) -> None:
+    server, links = data["server"], data["links"]
+    binds = server.get("listen_ips")
+    if not isinstance(binds, list) or not 1 <= len(binds) <= 16:
+        raise ConfigError("server.listen_ips must contain 1..16 addresses")
+    normalized = []
+    for value in binds:
+        try:
+            ip = addressing.literal(value)
+        except (ValueError, TypeError) as exc:
+            raise ConfigError("invalid server.listen_ips address") from exc
+        if any(addressing.overlaps(ip, other) for other in normalized):
+            raise ConfigError("overlapping server.listen_ips")
+        normalized.append(ip)
+    server["listen_ips"] = normalized
+    items = links.get("endpoints")
+    if not isinstance(items, list) or not 1 <= len(items) <= 16:
+        raise ConfigError("links.endpoints must contain 1..16 entries")
+    ids, pairs = set(), set()
+    for item in items:
+        if not isinstance(item, dict):
+            raise ConfigError("link endpoint must be a mapping")
+        reject_unknown(item, {"id", "host", "port", "families"}, "link endpoint")
+        name = item.get("id")
+        if not isinstance(name, str) or not INSTANCE_RE.fullmatch(name) or name in ids:
+            raise ConfigError("invalid or duplicate endpoint id")
+        ids.add(name)
+        try:
+            item["host"] = addressing.host(item.get("host"))
+        except (ValueError, UnicodeError) as exc:
+            raise ConfigError("invalid endpoint host") from exc
+        require_int(item.get("port"), "endpoint.port", 1, 65535)
+        pair = (item["host"], item["port"])
+        if pair in pairs:
+            raise ConfigError("duplicate public endpoint")
+        pairs.add(pair)
+        families = item.get("families")
+        if (not isinstance(families, list) or not families
+                or any(not isinstance(f, str) or f not in addressing.FAMILIES for f in families)
+                or len(set(families)) != len(families)):
+            raise ConfigError("endpoint.families must contain unique ipv4/ipv6 entries")
+        try:
+            actual = addressing.family(item["host"])
+        except ValueError:
+            pass
+        else:
+            if families != [actual]:
+                raise ConfigError("endpoint family conflicts with literal host")
+    if not isinstance(links.get("primary"), str) or links["primary"] not in ids:
+        raise ConfigError("links.primary must name an endpoint")
+    outbound = data.setdefault("outbound", {"families": ["ipv4"], "prefer": "ipv4"})
+    if not isinstance(outbound, dict):
+        raise ConfigError("outbound must be a mapping")
+    reject_unknown(outbound, {"families", "prefer"}, "outbound")
+    families = outbound.get("families")
+    if (not isinstance(families, list) or not families
+            or any(not isinstance(f, str) or f not in addressing.FAMILIES for f in families)
+            or len(set(families)) != len(families)):
+        raise ConfigError("outbound.families must contain unique ipv4/ipv6 entries")
+    if outbound.get("prefer") not in families:
+        raise ConfigError("outbound.prefer must be an enabled family")
+
+
 def validate(data: dict, yaml_path: Path | None = None) -> dict:
     reject_unknown(data, TOP_KEYS, "root")
+    v2 = data.get("schema_version") == 2 and type(data.get("schema_version")) is int
+    if "schema_version" in data and not v2:
+        raise ConfigError("unsupported schema_version; omit for legacy or use 2")
+    if not v2 and "outbound" in data:
+        raise ConfigError("outbound requires schema_version: 2")
+    if v2 and "instance" not in data:
+        raise ConfigError("schema_version 2 requires a named instance")
     for section in REQUIRED_TOP_KEYS:
         if section not in data:
             raise ConfigError(f"missing section: {section}")
@@ -183,7 +254,12 @@ def validate(data: dict, yaml_path: Path | None = None) -> dict:
     if not isinstance(upstreams, list):
         raise ConfigError("upstreams must be a list")
     for name, mapping in (("install", install), ("server", server), ("links", links), ("proxy", proxy), ("probes", probes)):
-        reject_unknown(mapping, SCHEMA[name], name)
+        allowed = SCHEMA[name]
+        if v2 and name == "server":
+            allowed = (allowed - {"listen_ip"}) | {"listen_ips"}
+        if v2 and name == "links":
+            allowed = {"primary", "endpoints"}
+        reject_unknown(mapping, allowed, name)
 
     for key in SCHEMA["install"]:
         if key not in install:
@@ -215,10 +291,13 @@ def validate(data: dict, yaml_path: Path | None = None) -> dict:
         raise ConfigError("install.state_root must be under /var/lib")
     require_bool(install["manage_ufw"], "install.manage_ufw")
 
-    try:
-        ipaddress.ip_address(server["listen_ip"])
-    except (ValueError, TypeError) as exc:
-        raise ConfigError("server.listen_ip must be a literal IP") from exc
+    if v2:
+        validate_addresses_v2(data)
+    else:
+        try:
+            ipaddress.ip_address(server["listen_ip"])
+        except (ValueError, TypeError) as exc:
+            raise ConfigError("server.listen_ip must be a literal IP") from exc
     require_int(server["port"], "server.port", 1, 65535)
     require_int(server["max_connections"], "server.max_connections", 1, 1_000_000)
     api_host, api_port = split_endpoint(server["api_listen"], "server.api_listen")
@@ -228,7 +307,8 @@ def validate(data: dict, yaml_path: Path | None = None) -> dict:
     if len({server["port"], api_port, metrics_port}) != 3:
         raise ConfigError("proxy, API and metrics ports must be distinct")
 
-    public_host = links.get("public_host")
+    public = addressing.primary(data) if v2 else {"host": links.get("public_host"), "port": links.get("public_port")}
+    public_host = public["host"]
     if not isinstance(public_host, str) or public_host in {"", "CHANGE_ME"}:
         raise ConfigError("links.public_host must be replaced with a public IP or DNS name")
     try:
@@ -236,7 +316,7 @@ def validate(data: dict, yaml_path: Path | None = None) -> dict:
     except ValueError:
         if not HOST_RE.fullmatch(public_host):
             raise ConfigError("links.public_host is not a valid IP or DNS name")
-    require_int(links.get("public_port"), "links.public_port", 1, 65535)
+    require_int(public["port"], "links public port", 1, 65535)
 
     for key in ("use_middle_proxy", "mask", "tls_emulation"):
         require_bool(proxy.get(key), "proxy." + key)
@@ -329,10 +409,12 @@ def existing_secrets(path: Path | None) -> dict[str, str]:
 def render(data: dict, old_secrets: dict[str, str]) -> str:
     install, server, links, proxy, users = (data[k] for k in ("install", "server", "links", "proxy", "users"))
     upstreams = data.get("upstreams", [])
+    public = addressing.primary(data)
+    v2 = data.get("schema_version") == 2
     tls_domain = proxy.get("tls_domain") or ""
-    tls_fetch_direct = proxy["tls_emulation"] and any(
+    tls_fetch_direct = proxy["tls_emulation"] and (v2 or any(
         upstream.get("enabled", True) for upstream in upstreams
-    )
+    ))
     resolved: dict[str, str] = {}
     for username, user in users.items():
         configured = user["secret"]
@@ -354,8 +436,8 @@ def render(data: dict, old_secrets: dict[str, str]) -> str:
         "",
         "[general.links]",
         "show = []",
-        f"public_host = {toml_string(links['public_host'])}",
-        f"public_port = {links['public_port']}",
+        f"public_host = {toml_string(public['host'])}",
+        f"public_port = {public['port']}",
         "",
         "[server]",
         f"port = {server['port']}",
@@ -370,11 +452,18 @@ def render(data: dict, old_secrets: dict[str, str]) -> str:
         "minimal_runtime_enabled = false",
         "minimal_runtime_cache_ttl_ms = 1000",
         "",
-        "[[server.listeners]]",
-        f"ip = {toml_string(server['listen_ip'])}",
-        "",
-        "[censorship]",
     ]
+    for ip in addressing.listen_ips(data):
+        lines.extend(["[[server.listeners]]", f"ip = {toml_string(ip)}", ""])
+    if v2:
+        # Global families permit inbound sockets; route flags below constrain egress.
+        enabled = {addressing.family(ip) for ip in addressing.listen_ips(data)} | set(data["outbound"]["families"])
+        if proxy["tls_emulation"] or proxy["mask"]:
+            enabled.add("ipv4")  # TLS-front remains independent of Telegram egress.
+        lines.extend(["[network]", f"ipv4 = {str('ipv4' in enabled).lower()}",
+                      f"ipv6 = {str('ipv6' in enabled).lower()}",
+                      f"prefer = {4 if data['outbound']['prefer'] == 'ipv4' else 6}", ""])
+    lines.append("[censorship]")
     if tls_domain:
         lines.append(f"tls_domain = {toml_string(tls_domain)}")
     lines.extend([
@@ -401,11 +490,15 @@ def render(data: dict, old_secrets: dict[str, str]) -> str:
                 f"username = {toml_string(upstream['username'])}",
                 f"password = {toml_string(upstream['password'])}",
             ])
+        if v2:
+            lines.extend(outbound_toml(data))
         lines.extend([
             f"weight = {upstream.get('weight', 1)}",
             f"enabled = {str(upstream.get('enabled', True)).lower()}",
             "",
         ])
+    if v2 and not any(upstream.get("enabled", True) for upstream in upstreams):
+        lines.extend(['[[upstreams]]', 'type = "direct"', 'weight = 1', 'enabled = true', *outbound_toml(data), ""])
     if tls_fetch_direct:
         lines.extend([
             "# Internal route: TLS-front metadata must bypass Telegram SOCKS5 upstreams.",
@@ -414,6 +507,7 @@ def render(data: dict, old_secrets: dict[str, str]) -> str:
             f"scopes = {toml_string(TLS_FETCH_DIRECT_SCOPE)}",
             "weight = 1",
             "enabled = true",
+            *(["ipv4 = true", "ipv6 = false"] if v2 else []),
             "",
         ])
     lines.append("[access.users]")
@@ -428,6 +522,12 @@ def render(data: dict, old_secrets: dict[str, str]) -> str:
         lines.extend(f"{toml_string(name)} = {limit}" for name, limit in limits.items())
     lines.append("")
     return "\n".join(lines)
+
+
+def outbound_toml(data: dict) -> list[str]:
+    policy = data["outbound"]
+    # 3.5.16 strict config rejects per-upstream prefer; use network.prefer.
+    return [f"{family} = {str(family in policy['families']).lower()}" for family in ("ipv4", "ipv6")]
 
 
 def lookup(data: dict, key: str) -> object:
